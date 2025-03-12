@@ -26,3 +26,11 @@ plt.figure(figsize=(10, 6))
 plt.imshow(image)
 plt.title(f"Test image: {image.size[0]}x{image.size[1]}")
 plt.show()
+
+# Test different image sizes
+max_sizes_to_test = [None, 224, 448, (640, 320)]
+memory_usages = []
+tensor_shapes = []
+
+# Try Qwen2-VL which uses a more standardized image processing approach
+model_name = "unsloth/Qwen2-VL-7B-Instruct-unsloth-bnb-4bit"
