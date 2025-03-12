@@ -162,6 +162,7 @@ def resize_images(images, target_size, keep_aspect_ratio=True):
     
     return images
 
+
 def unsloth_base_fast_generate(
     self,
     *args,
@@ -211,7 +212,6 @@ def unsloth_base_fast_generate(
 
     FastBaseModel.for_training(self)
     return output
-pass
 
 
 class FastBaseModel:
@@ -228,6 +228,7 @@ class FastBaseModel:
         model_types       = None,
         tokenizer_name    = None,
         auto_model        = AutoModelForVision2Seq,
+        max_image_size    = None,
         **kwargs,
     ):
         if trust_remote_code:
