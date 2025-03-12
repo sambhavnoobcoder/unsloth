@@ -171,7 +171,7 @@ def unsloth_base_fast_generate(
     dtype = _get_dtype(self.config.torch_dtype)
 
     # Check if VLM
-    is_vlm = (x.endswith("ForConditionalGeneration") for x in self.config.architectures)
+    is_vlm = any(x.endswith("ForConditionalGeneration") for x in self.config.architectures)
     is_vlm = is_vlm or hasattr(self.config, "vision_config")
 
     # Remove token_type_ids
@@ -187,10 +187,23 @@ def unsloth_base_fast_generate(
 
     kwargs["pad_token_id"] = kwargs.pop("pad_token_id", model_eos_token_id)
 
-    # Get pixel values for VLMs
-    try: kwargs["pixel_values"] = kwargs["pixel_values"].to(dtype)
-    except: pass
+    # Resize pixel values if present and we have a target size
+    if "pixel_values" in kwargs and hasattr(self, "unsloth_target_image_size") and self.unsloth_target_image_size is not None:
+        pixel_values = kwargs["pixel_values"]
+        kwargs["pixel_values"] = resize_images(pixel_values, self.unsloth_target_image_size)
 
+    # Look for other potential image tensors (different models use different keys)
+    for key in kwargs:
+        if any(img_key in key for img_key in ["image", "pixel", "vision"]) and torch.is_tensor(kwargs[key]):
+            if hasattr(self, "unsloth_target_image_size") and self.unsloth_target_image_size is not None:
+                kwargs[key] = resize_images(kwargs[key], self.unsloth_target_image_size)
+
+    # Convert pixel values to the right dtype
+    try: 
+        if "pixel_values" in kwargs:
+            kwargs["pixel_values"] = kwargs["pixel_values"].to(dtype)
+    except: pass
+    
     # Mixed precision autocast
     with torch.inference_mode(), torch.autocast(device_type = "cuda", dtype = dtype):
         output = self._old_generate(*args, **kwargs)
