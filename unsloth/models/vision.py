@@ -82,6 +82,86 @@ def process_image_sizes(model_config, max_image_size=None):
     # If we reach here, no size was specified
     return None
 
+
+def resize_images(images, target_size, keep_aspect_ratio=True):
+    """
+    Resize images to target size.
+    
+    Args:
+        images: PyTorch tensor of shape (B, C, H, W) or PIL Image
+        target_size: Tuple of (width, height)
+        keep_aspect_ratio: Whether to preserve aspect ratio
+        
+    Returns:
+        Resized images
+    """
+    if target_size is None:
+        return images
+    
+    # Handle single PIL image
+    if isinstance(images, Image.Image):
+        if keep_aspect_ratio:
+            # Create a copy to avoid modifying the original
+            img_copy = images.copy()
+            img_copy.thumbnail(target_size, Image.LANCZOS)
+            return img_copy
+        else:
+            return images.resize(target_size, Image.LANCZOS)
+    
+    # Handle tensor of images
+    if torch.is_tensor(images):
+        # Check if this is a flattened tensor (Qwen2-VL specific format)
+        if len(images.shape) == 2:
+            # For flattened tensors, we need to preserve the second dimension
+            # and only resize the first dimension proportionally
+            orig_size = images.shape[0]
+            target_size_1d = min(orig_size, target_size[0] * target_size[1])
+            
+            # Create a new tensor with the target size
+            resized = torch.zeros((target_size_1d, images.shape[1]), 
+                                  dtype=images.dtype, 
+                                  device=images.device)
+            
+            # Copy data from original tensor, truncating if necessary
+            copy_size = min(orig_size, target_size_1d)
+            resized[:copy_size] = images[:copy_size]
+            
+            return resized
+        
+        # Standard image tensor with shape (B, C, H, W)
+        elif len(images.shape) == 4:
+            b, c, h, w = images.shape
+            
+            if h <= target_size[1] and w <= target_size[0]:
+                # No need to resize if already smaller
+                return images
+                
+            if keep_aspect_ratio:
+                # Calculate new dimensions preserving aspect ratio
+                aspect_ratio = w / h
+                if w > h:
+                    new_w = min(w, target_size[0])
+                    new_h = int(new_w / aspect_ratio)
+                    if new_h > target_size[1]:
+                        new_h = target_size[1]
+                        new_w = int(new_h * aspect_ratio)
+                else:
+                    new_h = min(h, target_size[1])
+                    new_w = int(new_h * aspect_ratio)
+                    if new_w > target_size[0]:
+                        new_w = target_size[0]
+                        new_h = int(new_w / aspect_ratio)
+                
+                # Ensure minimum size of 1
+                new_w = max(1, new_w)
+                new_h = max(1, new_h)
+            else:
+                new_w, new_h = target_size
+            
+            return F.resize(images, [new_h, new_w], antialias=True)
+    
+    return images
+
 def unsloth_base_fast_generate(
     self,
     *args,
