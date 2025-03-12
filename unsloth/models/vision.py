@@ -19,6 +19,7 @@ from transformers import (
     AutoProcessor,
     AutoTokenizer,
     AutoModelForCausalLM,
+    AutoConfig,
 )
 from .llama import *
 from ..kernels import (
@@ -37,6 +38,12 @@ from unsloth_zoo.utils import _get_dtype
 from unsloth_zoo.patching_utils import patch_model_and_tokenizer
 import types
 import functools
+import os
+import gc
+import platform
+import requests
+from PIL import Image
+import torchvision.transforms.functional as F
 
 __all__ = [
     "FastBaseModel",
