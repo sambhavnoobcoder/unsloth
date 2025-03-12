@@ -203,7 +203,7 @@ def unsloth_base_fast_generate(
         if "pixel_values" in kwargs:
             kwargs["pixel_values"] = kwargs["pixel_values"].to(dtype)
     except: pass
-    
+
     # Mixed precision autocast
     with torch.inference_mode(), torch.autocast(device_type = "cuda", dtype = dtype):
         output = self._old_generate(*args, **kwargs)
@@ -353,6 +353,85 @@ class FastBaseModel:
             model._old_generate = model.generate
             unsloth_base_fast_generate.__doc__ = model._old_generate.__doc__
             model.generate = types.MethodType(unsloth_base_fast_generate, model)
+
+        # Get model config to extract image size information if needed
+        config = AutoConfig.from_pretrained(
+            model_name,
+            token=token,
+            trust_remote_code=trust_remote_code,
+        )
+        
+        # Process image size parameters
+        target_image_size = process_image_sizes(config, max_image_size)
+        
+        # Store the target image size in model for later use
+        model.unsloth_target_image_size = target_image_size
+        
+        # Patch image processing based on processor type
+        if hasattr(tokenizer, "image_processor"):
+            original_preprocess = tokenizer.image_processor.preprocess
+            
+            def patched_preprocess(images, **kwargs):
+                # First resize the images if needed
+                if target_image_size is not None:
+                    if isinstance(images, list):
+                        images = [resize_images(img, target_image_size) for img in images]
+                    else:
+                        images = resize_images(images, target_image_size)
+                
+                # Then call the original preprocess
+                return original_preprocess(images, **kwargs)
+            
+            tokenizer.image_processor.preprocess = patched_preprocess
+        
+        # For MllamaProcessor-like processors that don't expose image_processor
+        elif hasattr(tokenizer, "__call__") and "MllamaProcessor" in tokenizer.__class__.__name__:
+            original_call = tokenizer.__call__
+            
+            def patched_call(*args, **kwargs):
+                # Extract images if present
+                images = kwargs.pop("images", None)
+                image = kwargs.pop("image", None)
+                
+                # Use whichever is provided
+                img = images if images is not None else image
+                
+                # Resize images if needed
+                if img is not None and target_image_size is not None:
+                    if isinstance(img, list):
+                        img = [resize_images(i, target_image_size) for i in img]
+                    else:
+                        img = resize_images(img, target_image_size)
+                
+                # Call original __call__ with the right parameter name
+                if img is not None:
+                    kwargs["image"] = img  # MllamaProcessor uses "image" not "images"
+                
+                return original_call(*args, **kwargs)
+            
+            tokenizer.__call__ = patched_call
+        
+        # For any other processor, try to patch common methods
+        else:
+            # Look for common image processing methods
+            for method_name in ["process_images", "preprocess", "preprocess_images"]:
+                if hasattr(tokenizer, method_name) and callable(getattr(tokenizer, method_name)):
+                    original_method = getattr(tokenizer, method_name)
+                    
+                    def patched_method(images, **kwargs):
+                        # Resize images if needed
+                        if target_image_size is not None:
+                            if isinstance(images, list):
+                                images = [resize_images(img, target_image_size) for img in images]
+                            else:
+                                images = resize_images(images, target_image_size)
+                        
+                        # Call original method
+                        return original_method(images, **kwargs)
+                    
+                    setattr(tokenizer, method_name, patched_method)
+                    break
+        
         return model, tokenizer
     pass
 
