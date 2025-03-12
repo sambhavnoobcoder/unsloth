@@ -50,6 +50,38 @@ __all__ = [
 ]
 
 
+def process_image_sizes(model_config, max_image_size=None):
+    """
+    Determine the target image size from config or provided parameter.
+    
+    Args:
+        model_config: The model configuration object
+        max_image_size: Optional user-specified max image size (int or tuple)
+        
+    Returns:
+        Tuple of (width, height) for target image size
+    """
+    # First check if user explicitly provided a size
+    if max_image_size is not None:
+        if isinstance(max_image_size, int):
+            return (max_image_size, max_image_size)
+        elif isinstance(max_image_size, (tuple, list)) and len(max_image_size) == 2:
+            return tuple(max_image_size)
+        else:
+            raise ValueError("max_image_size must be an integer or tuple of two integers (width, height)")
+    
+    # Otherwise try to get from config
+    if hasattr(model_config, "vision_config"):
+        vision_config = model_config.vision_config
+        if hasattr(vision_config, "image_size"):
+            if isinstance(vision_config.image_size, int):
+                return (vision_config.image_size, vision_config.image_size)
+            elif isinstance(vision_config.image_size, (list, tuple)):
+                return tuple(vision_config.image_size)
+    
+    # If we reach here, no size was specified
+    return None
+
 def unsloth_base_fast_generate(
     self,
     *args,
