@@ -17,14 +17,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import unsloth
 import unsloth.models.loader as _loader
-
 # Monkey-patch compile_transformers to avoid None return unpacking error
 def _compile_transformers_stub(*args, **kwargs):
     # Return default tuple when original returns None
     return None, False
 _loader.unsloth_compile_transformers = _compile_transformers_stub
 
-from unsloth import FastModel
+# Import the correct Vision model wrapper
+from unsloth.models.vision import FastVisionModel
 from huggingface_hub import login as hf_login
 
 class TestVisionGGUF(unittest.TestCase):
@@ -48,8 +48,8 @@ class TestVisionGGUF(unittest.TestCase):
             print("Device does not support bfloat16. Using float16 instead.")
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Load the model with proper token and dtype
-            model, tokenizer = FastModel.from_pretrained(
+            # Load the vision model with proper token and dtype
+            model, tokenizer = FastVisionModel.from_pretrained(
                 model_name=model_name,
                 max_seq_length=2048,
                 dtype=desired_dtype,
