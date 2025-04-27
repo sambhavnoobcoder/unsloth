@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Test conversion of vision models to GGUF format
+Test conversion of vision models to GGUF format (fixed)
 """
 
 import os
@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from unsloth import FastModel
+from huggingface_hub import login as hf_login
 
 class TestVisionGGUF(unittest.TestCase):
     """Test saving vision models to GGUF format"""
@@ -23,35 +24,44 @@ class TestVisionGGUF(unittest.TestCase):
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_vision_gguf_conversion(self):
         """Test converting a vision model to GGUF format"""
-        # Use an existing vision model for testing - Llama 3.1 Vision
-        model_name = "unsloth/Llama-3.1-11B-Vision-Instruct-bnb-4bit"
-        # Alternatively try: model_name = "unsloth/llama-3.1-11b-vision-bnb-4bit"
-        
+        # Authenticate with Hugging Face (if HF_TOKEN is set in environment)
+        token = os.getenv("HF_TOKEN", None)
+        if token:
+            hf_login(token=token)
+
+        # Use an existing vision model for testing
+        model_name = "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit"
         print(f"Testing with vision model: {model_name}")
-        
+
+        # Pick dtype: use bfloat16 if supported, else float16
+        desired_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        if desired_dtype == torch.float16:
+            print("Device does not support bfloat16. Using float16 instead.")
+
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Load the model
+            # Load the model with proper token and dtype
             model, tokenizer = FastModel.from_pretrained(
                 model_name=model_name,
                 max_seq_length=2048,
-                dtype=torch.bfloat16,
+                dtype=desired_dtype,
                 load_in_4bit=True,
-                # If you have a token, you can use it here
-                # token="your_hf_token_here"
+                trust_remote_code=True,
+                token=token,
             )
-            
+
             # Save the model in GGUF format
+            output_dir = Path(temp_dir) / "test_vision_model"
             gguf_path = model.save_pretrained_gguf(
-                save_directory=os.path.join(temp_dir, "test_vision_model"),
+                save_directory=str(output_dir),
                 tokenizer=tokenizer,
                 quantization_method="q8_0"
             )
-            
+
             # Check that the GGUF file was created
-            self.assertTrue(os.path.exists(gguf_path))
-            self.assertTrue(gguf_path.endswith(".gguf"))
-            
+            self.assertTrue(os.path.exists(gguf_path), f"GGUF file not found at {gguf_path}")
+            self.assertTrue(str(gguf_path).endswith(".gguf"), f"File does not have .gguf extension: {gguf_path}")
+
             print(f"Successfully created GGUF file at: {gguf_path}")
 
 if __name__ == "__main__":
-    unittest.main() 
+    unittest.main()
