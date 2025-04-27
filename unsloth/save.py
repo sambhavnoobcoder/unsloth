@@ -43,6 +43,7 @@ except:
     pass
 pass
 from pathlib import Path
+import json
 
 __all__ = [
     "print_quantization_methods",
@@ -926,6 +927,181 @@ def install_llama_cpp_blocking(use_cuda = False):
         ]
         try_execute(commands)
     pass
+    
+    # Create a custom vision-capable converter if it doesn't exist
+    create_vision_gguf_converter()
+    
+    return
+
+def create_vision_gguf_converter():
+    """Create or modify the llama.cpp converter to support vision models"""
+    
+    # Path to the standard converter that we'll use as a base
+    base_converter_path = None
+    if os.path.exists("llama.cpp/convert-hf-to-gguf.py"):
+        base_converter_path = "llama.cpp/convert-hf-to-gguf.py"
+    elif os.path.exists("llama.cpp/convert_hf_to_gguf.py"):
+        base_converter_path = "llama.cpp/convert_hf_to_gguf.py"
+    
+    if base_converter_path is None:
+        logger.warning(
+            "Unsloth: Could not find llama.cpp GGUF converter script to modify. Vision model conversion may fail."
+        )
+        return
+    
+    # Path for our custom script
+    vision_converter_path = os.path.join("llama.cpp", "unsloth_convert_hf_to_gguf.py")
+    
+    # Check if the custom converter already exists
+    if os.path.exists(vision_converter_path):
+        return  # Already exists, no need to recreate
+    
+    print("Unsloth: Creating vision-capable GGUF converter script...")
+    
+    # Read the base converter script
+    with open(base_converter_path, "r") as f:
+        converter_code = f.read()
+    
+    # Create vision model detection function
+    vision_detection = """
+# Unsloth Vision Model Support
+import json
+import re
+
+def is_vision_model(model_path):
+    \"\"\"Check if the model is a vision model by looking for vision_config.json or model metadata\"\"\"
+    vision_config_path = os.path.join(model_path, "vision_config.json")
+    config_path = os.path.join(model_path, "config.json")
+    
+    # Check for our custom vision config file
+    if os.path.exists(vision_config_path):
+        return True
+    
+    # Check model config for vision indicators
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            config = json.load(f)
+            
+            # Check for vision indicators in the config
+            if "vision_config" in config:
+                return True
+            if "architectures" in config:
+                for arch in config["architectures"]:
+                    if any(x in arch for x in ["Vision", "vision", "Clip", "CLIP", "Siglip"]):
+                        return True
+    
+    return False
+"""
+    
+    # Create vision model patching function
+    vision_patching = """
+def patch_model_for_vision(model_path, model, params):
+    \"\"\"Add vision-specific parameters and tensor mappings\"\"\"
+    if not is_vision_model(model_path):
+        return
+    
+    print("    Vision model detected - adding vision-specific GGUF parameters")
+    
+    # Add vision-specific metadata
+    params["unsloth.is_vision_model"] = True
+
+    # Get the model config
+    config_path = os.path.join(model_path, "config.json")
+    vision_config = {}
+    
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            config = json.load(f)
+            if "vision_config" in config:
+                vision_config = config["vision_config"]
+    
+    # Check for our custom vision config
+    vision_config_path = os.path.join(model_path, "vision_config.json")
+    if os.path.exists(vision_config_path):
+        with open(vision_config_path, "r") as f:
+            vision_config = json.load(f)
+    
+    # Add vision model config parameters
+    for key, value in vision_config.items():
+        if isinstance(value, (int, float, bool, str)):
+            params[f"unsloth.vision.{key}"] = value
+
+    # Mark special tensors for vision models
+    for name, tensor in model.items():
+        # Find vision encoder related tensors
+        if any(x in name for x in ["visual_encoder", "vision_model", "vision_tower", "image_encoder"]):
+            tensor["mapping"] = "vision.encoder"
+        # Find vision projection related tensors
+        elif any(x in name for x in ["visual_projection", "vision_projection"]):
+            tensor["mapping"] = "vision.projection"
+    
+    print("    Added vision model support to GGUF")
+"""
+    
+    # Find appropriate insertion point - after imports but before main code
+    import_end_match = re.search(r"^import.*?\n\n", converter_code, re.MULTILINE | re.DOTALL)
+    if import_end_match:
+        insert_position = import_end_match.end()
+        patch = vision_detection + vision_patching
+        converter_code = converter_code[:insert_position] + patch + converter_code[insert_position:]
+    else:
+        # Fallback - add at the beginning
+        patch = vision_detection + vision_patching
+        converter_code = patch + converter_code
+    
+    # Find the main function where we need to call our vision patching
+    main_func_pattern = r"def (model_to_gguf|main|convert_model_to_gguf)"
+    main_func_match = re.search(main_func_pattern, converter_code)
+    
+    if main_func_match:
+        func_name = main_func_match.group(1)
+        
+        # Look for where model dictionary is created
+        model_load_pattern = r"(\s+)model\s*=\s*\{[^\}]*\}[\s\n]*"
+        model_load_match = re.search(model_load_pattern, converter_code)
+        
+        if model_load_match:
+            indent = model_load_match.group(1)
+            insert_position = model_load_match.end()
+            vision_call = f"\n{indent}# Patch model for vision support\n{indent}patch_model_for_vision(model_path, model, params)\n"
+            
+            converter_code = converter_code[:insert_position] + vision_call + converter_code[insert_position:]
+    
+    # Add model metadata argument to the argparse
+    argparse_pattern = r"(parser\.add_argument\([^)]*\)[\s\n]*$)"
+    arg_match = re.search(argparse_pattern, converter_code, re.MULTILINE)
+    
+    if arg_match:
+        insert_position = arg_match.end()
+        metadata_arg = """
+    parser.add_argument("--model-metadata", type=str, help="Additional model metadata as JSON string")
+"""
+        converter_code = converter_code[:insert_position] + metadata_arg + converter_code[insert_position:]
+    
+    # Process metadata argument
+    args_parse_pattern = r"(\s+)args\s*=\s*parser\.parse_args\(\)"
+    args_match = re.search(args_parse_pattern, converter_code)
+    
+    if args_match:
+        indent = args_match.group(1)
+        insert_position = args_match.end()
+        metadata_process = f"""
+{indent}# Process model metadata if provided
+{indent}if args.model_metadata:
+{indent}    try:
+{indent}        model_metadata = json.loads(args.model_metadata)
+{indent}        for key, value in model_metadata.items():
+{indent}            params[f"unsloth.{{key}}"] = value
+{indent}    except json.JSONDecodeError:
+{indent}        print(f"Warning: Could not parse model metadata: {{args.model_metadata}}")
+"""
+        converter_code = converter_code[:insert_position] + metadata_process + converter_code[insert_position:]
+    
+    # Write the modified converter
+    with open(vision_converter_path, "w") as f:
+        f.write(converter_code)
+    
+    print(f"Unsloth: Created vision-capable GGUF converter at {vision_converter_path}")
 pass
 
 
@@ -2523,11 +2699,209 @@ def patch_saving_functions(model, vision = False):
             model.save_pretrained_ggml   = types.MethodType(unsloth_convert_lora_to_ggml_and_save_locally, model)
         pass
     else:
-        # Vision only 1 option
+        # Vision model saving methods
         model.push_to_hub_merged     = types.MethodType(unsloth_generic_push_to_hub_merged,     model)
         model.save_pretrained_merged = types.MethodType(unsloth_generic_save_pretrained_merged, model)
-        model.push_to_hub_gguf       = types.MethodType(save_to_gguf_generic,                   model)
-        model.save_pretrained_gguf   = types.MethodType(save_to_gguf_generic,                   model)
+        model.push_to_hub_gguf       = types.MethodType(vision_model_push_to_hub_gguf,          model)
+        model.save_pretrained_gguf   = types.MethodType(vision_model_save_pretrained_gguf,      model)
     pass
     return model
 pass
+
+@torch.inference_mode
+def vision_model_save_pretrained_gguf(
+    self,
+    save_directory       : Union[str, os.PathLike],
+    tokenizer            = None,
+    quantization_method  : str = "q8_0",
+    first_conversion     : str = None,
+    push_to_hub          : bool = False,
+    token                : Optional[Union[str, bool]] = None,
+    private              : Optional[bool] = None,
+    is_main_process      : bool = True,
+    state_dict           : Optional[dict] = None,
+    save_function        : Callable = torch.save,
+    max_shard_size       : Union[int, str] = "5GB",
+    safe_serialization   : bool = True,
+    variant              : Optional[str] = None,
+    save_peft_format     : bool = True,
+    tags                 : List[str] = None,
+    temporary_location   : str = "_unsloth_temporary_saved_buffers",
+    maximum_memory_usage : float = 0.85,
+):
+    """
+    Save vision model in GGUF format for Ollama and other applications.
+    Similar to save_pretrained_gguf but specifically handles vision model architecture differences.
+    
+    Choose for `quantization_method` to be:
+    "q8_0"    : "Fast conversion. High resource use, but generally acceptable."
+    "q4_k_m"  : "Recommended. Uses Q6_K for half of the attention.wv and feed_forward.w2 tensors, else Q4_K"
+    "q5_k_m"  : "Recommended. Uses Q6_K for half of the attention.wv and feed_forward.w2 tensors, else Q5_K"
+    "f16"     : "Fastest conversion + retains 100% accuracy. Slow and memory hungry."
+    """
+    if tokenizer is None:
+        raise ValueError("Unsloth: Saving to GGUF must have a tokenizer.")
+        
+    # First save the model in merged format
+    arguments = dict(locals())
+    arguments["model"] = self
+    arguments["tokenizer"] = tokenizer
+    arguments["push_to_hub"] = False  # We'll handle upload separately
+    arguments["save_method"] = "merged_16bit"  # Must be 16bit
+    del arguments["self"]
+    del arguments["quantization_method"]
+    del arguments["first_conversion"]
+    
+    # Save the model in HF format first (same as regular models)
+    new_save_directory, old_username = unsloth_save_model(**arguments)
+    
+    print(f"Unsloth: Saved model to {new_save_directory}. Now converting to GGUF...")
+    
+    # Install llama.cpp if needed
+    if not os.path.exists("llama.cpp"):
+        print("Unsloth: Installing llama.cpp. This might take a few minutes...")
+        if IS_KAGGLE_ENVIRONMENT:
+            python_install = install_python_non_blocking(["gguf", "protobuf"])
+            python_install.wait()
+            install_llama_cpp_blocking(use_cuda=False)
+            makefile = None
+        else:
+            git_clone = install_llama_cpp_clone_non_blocking()
+            python_install = install_python_non_blocking(["gguf", "protobuf"])
+            git_clone.wait()
+            makefile = install_llama_cpp_make_non_blocking()
+            python_install.wait()
+            if makefile:
+                makefile[0].wait()
+    
+    # Determine model info
+    model_dtype = self.config.torch_dtype
+    model_type = self.config.model_type
+    
+    if type(model_dtype) is str:
+        assert(model_dtype == "float16" or model_dtype == "bfloat16")
+    elif model_dtype == torch.float16:
+        model_dtype = "float16"
+    elif model_dtype == torch.bfloat16:
+        model_dtype = "bfloat16"
+    else:
+        raise TypeError("Unsloth: Model dtype can only be float16 or bfloat16")
+    
+    # Add vision-specific config for conversion
+    config_file = os.path.join(new_save_directory, "vision_config.json")
+    with open(config_file, "w") as f:
+        if hasattr(self.config, "vision_config"):
+            vision_config = self.config.vision_config.to_dict()
+        else:
+            vision_config = {"is_vision_model": True}
+        
+        json.dump({
+            "is_vision_model": True,
+            "model_type": model_type,
+            "vision_config": vision_config,
+            "unsloth_version": getattr(self.config, "unsloth_version", "unknown")
+        }, f)
+    
+    # Find the appropriate conversion script
+    convert_location = None
+    if os.path.exists("llama.cpp/unsloth_convert_hf_to_gguf.py"):
+        convert_location = "llama.cpp/unsloth_convert_hf_to_gguf.py"
+    elif os.path.exists("llama.cpp/convert-hf-to-gguf.py"):
+        convert_location = "llama.cpp/convert-hf-to-gguf.py"
+    elif os.path.exists("llama.cpp/convert_hf_to_gguf.py"):
+        convert_location = "llama.cpp/convert_hf_to_gguf.py"
+    else:
+        raise RuntimeError(
+            "Unsloth: The file 'llama.cpp/convert-hf-to-gguf.py' or 'llama.cpp/convert_hf_to_gguf.py' does not exist.\n"\
+            "But we expect this file to exist! Maybe the llama.cpp developers changed the name?"
+        )
+    
+    # Set up parameters for GGUF conversion
+    if quantization_method == "not_quantized":  
+        quantization_method = "f16"
+    elif quantization_method == "fast_quantized": 
+        quantization_method = "q8_0"
+    elif quantization_method == "quantized":      
+        quantization_method = "q4_k_m"
+    elif quantization_method is None:             
+        quantization_method = "q8_0"
+    
+    # Create the output filename
+    final_location = str((Path(new_save_directory) / f"unsloth.{quantization_method.upper()}.gguf").absolute())
+    
+    print(f"Unsloth: Converting vision model to GGUF format ({quantization_method})...")
+    print(f"This might take several minutes depending on model size...")
+    
+    # Run the conversion with vision model flag
+    command = f"python {convert_location} {new_save_directory} "\
+        f"--outfile {final_location} "\
+        f"--outtype {quantization_method} "\
+        f"--model-metadata '{{'is_vision_model':true}}'"
+    
+    try_execute([command], force_complete=True)
+    
+    # Check if conversion succeeded
+    if not os.path.isfile(final_location):
+        raise RuntimeError(f"Unsloth: Vision model conversion to GGUF failed for {final_location}")
+    
+    print(f"Unsloth: Successfully converted vision model to GGUF format!")
+    print(f"Unsloth: Saved GGUF to {final_location}")
+    
+    # Upload to HF Hub if requested
+    if push_to_hub:
+        print("Unsloth: Uploading GGUF to Huggingface Hub...")
+        username = upload_to_huggingface(
+            self, save_directory, token,
+            "GGUF converted", "gguf", final_location, old_username, private,
+        )
+        link = f"{username}/{new_save_directory.lstrip('/.')}" \
+            if username not in new_save_directory else \
+            new_save_directory.lstrip('/.')
+        print(f"Saved GGUF to https://huggingface.co/{link}")
+    
+    return final_location
+
+@torch.inference_mode
+def vision_model_push_to_hub_gguf(
+    self,
+    repo_id              : str,
+    tokenizer            = None,
+    quantization_method  : str = "q8_0",
+    first_conversion     : str = None,
+    use_temp_dir         : Optional[bool] = None,
+    commit_message       : Optional[str] = "Trained with Unsloth",
+    private              : Optional[bool] = None,
+    token                : Union[bool, str, None] = None,
+    max_shard_size       : Union[int, str, None] = "5GB",
+    create_pr            : bool = False,
+    safe_serialization   : bool = True,
+    revision             : str = None,
+    commit_description   : str = "Upload vision model trained with Unsloth in GGUF format",
+    tags                 : Optional[List[str]] = None,
+    temporary_location   : str = "_unsloth_temporary_saved_buffers",
+    maximum_memory_usage : float = 0.85,
+):
+    """
+    Push a vision model in GGUF format to the Hugging Face Hub.
+    
+    Arguments are similar to save_pretrained_gguf but for direct Hub upload.
+    """
+    if token is None: token = get_token()
+    
+    # Call the save function first with push_to_hub=True
+    gguf_location = vision_model_save_pretrained_gguf(
+        self,
+        save_directory=repo_id,  # Use repo_id as save directory
+        tokenizer=tokenizer,
+        quantization_method=quantization_method,
+        first_conversion=first_conversion,
+        push_to_hub=True,  # Enable push to Hub
+        token=token,
+        private=private,
+        tags=tags,
+        temporary_location=temporary_location,
+        maximum_memory_usage=maximum_memory_usage,
+    )
+    
+    print(f"Unsloth: Successfully pushed vision model in GGUF format to https://huggingface.co/{repo_id}")
+    return gguf_location
