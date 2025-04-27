@@ -23,8 +23,7 @@ def _compile_transformers_stub(*args, **kwargs):
     return None, False
 _loader.unsloth_compile_transformers = _compile_transformers_stub
 
-# Import the correct Vision model wrapper
-from unsloth.models.vision import FastVisionModel
+from unsloth import FastVisionModel
 from huggingface_hub import login as hf_login
 
 class TestVisionGGUF(unittest.TestCase):
