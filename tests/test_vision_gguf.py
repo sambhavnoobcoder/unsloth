@@ -1,5 +1,10 @@
+"""
+Test conversion of vision models to GGUF format - fully self-contained
+"""
+
 import os
 import sys
+import json
 import torch
 import tempfile
 from pathlib import Path
@@ -13,14 +18,21 @@ from unsloth.save import vision_model_save_pretrained_gguf, patch_saving_functio
 # Create a minimal mock model with just enough structure to test GGUF export
 class MockVisionModel:
     def __init__(self):
-        from transformers import AutoConfig
-        # Create a basic config with vision attributes
-        self.config = AutoConfig.from_pretrained("microsoft/phi-3-mini")
-        self.config.vision_config = {"image_size": 224, "patch_size": 16, "hidden_size": 768}
-        self.config.torch_dtype = torch.bfloat16
-        self.config.model_type = "phi3_vision"
-        # Add basic tokenizer for the test
-        self.tokenizer = None
+        # Create a basic config with vision attributes directly
+        class Config:
+            def __init__(self):
+                self.vision_config = {"image_size": 224, "patch_size": 16, "hidden_size": 768}
+                self.torch_dtype = torch.float16
+                self.model_type = "llama_vision"
+                self.unsloth_version = "1.0.0"
+                
+            def to_dict(self):
+                return {
+                    "vision_config": self.vision_config,
+                    "model_type": self.model_type
+                }
+                
+        self.config = Config()
 
     def save_pretrained(self, *args, **kwargs):
         # Mock the save_pretrained functionality
@@ -28,7 +40,10 @@ class MockVisionModel:
         os.makedirs(directory, exist_ok=True)
         # Save a minimal config file
         with open(os.path.join(directory, "config.json"), "w") as f:
-            f.write('{"model_type":"phi3_vision","vision_config":{"image_size":224,"patch_size":16,"hidden_size":768}}')
+            json.dump({
+                "model_type": self.config.model_type,
+                "vision_config": self.config.vision_config
+            }, f)
         return directory
 
 def main():
@@ -44,7 +59,7 @@ def main():
         def save_pretrained(self, directory):
             os.makedirs(directory, exist_ok=True)
             with open(os.path.join(directory, "tokenizer_config.json"), "w") as f:
-                f.write('{"model_type":"phi3"}')
+                json.dump({"model_type": "llama"}, f)
     
     tokenizer = MockTokenizer()
     
@@ -55,24 +70,28 @@ def main():
         print("Testing vision_model_save_pretrained_gguf function...")
         try:
             # We expect this to fail when trying to convert to GGUF
-            # But it should at least get to the point where it calls the llama.cpp converter
-            model.save_pretrained_gguf(
+            # But it should at least get past the initialization and run until it tries to use llama.cpp
+            gguf_path = model.save_pretrained_gguf(
                 save_directory=output_dir,
                 tokenizer=tokenizer,
                 quantization_method="q8_0"
             )
+            print(f"SUCCESS! Created GGUF file at: {gguf_path}")
             success = True
         except Exception as e:
             # If we got an error about llama.cpp converter missing, that's expected and means our function is correctly called
-            if "llama.cpp" in str(e):
+            error_str = str(e)
+            if "llama.cpp" in error_str:
                 print("SUCCESS! Got expected error about missing llama.cpp. Function was called correctly.")
+                print(f"Error: {error_str}")
                 success = True
             else:
-                print(f"ERROR: {str(e)}")
+                print(f"ERROR: {error_str}")
                 success = False
         
         return success
 
 if __name__ == "__main__":
     success = main()
+    print(f"Test {'passed' if success else 'failed'}")
     sys.exit(0 if success else 1)
