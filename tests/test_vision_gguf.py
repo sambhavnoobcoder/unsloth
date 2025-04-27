@@ -33,6 +33,7 @@ class MockVisionModel:
                 }
                 
         self.config = Config()
+        self.original_push_to_hub = None
 
     def save_pretrained(self, *args, **kwargs):
         # Mock the save_pretrained functionality
@@ -45,6 +46,15 @@ class MockVisionModel:
                 "vision_config": self.config.vision_config
             }, f)
         return directory
+        
+    # Add push_to_hub method
+    def push_to_hub(self, *args, **kwargs):
+        print("Mock push_to_hub called")
+        return "mock_repo_id"
+        
+    # Add any other methods that might be needed
+    def add_model_tags(self, tags):
+        print(f"Adding model tags: {tags}")
 
 def main():
     """Test the vision model GGUF conversion function directly"""
@@ -52,16 +62,32 @@ def main():
     model = MockVisionModel()
     
     # Apply patching to add the save_pretrained_gguf method
+    print("Patching saving functions...")
     patch_saving_functions(model, vision=True)
     
     # Create dummy tokenizer
     class MockTokenizer:
+        def __init__(self):
+            self.original_push_to_hub = None
+            
         def save_pretrained(self, directory):
             os.makedirs(directory, exist_ok=True)
             with open(os.path.join(directory, "tokenizer_config.json"), "w") as f:
                 json.dump({"model_type": "llama"}, f)
+                
+        def push_to_hub(self, *args, **kwargs):
+            print("Mock tokenizer push_to_hub called")
+            return "mock_tokenizer_repo_id"
     
     tokenizer = MockTokenizer()
+    
+    # Check if patching succeeded
+    print("Checking if save_pretrained_gguf method was added...")
+    if hasattr(model, 'save_pretrained_gguf'):
+        print("✅ save_pretrained_gguf method successfully added to model")
+    else:
+        print("❌ save_pretrained_gguf method not added to model")
+        return False
     
     # Test the GGUF conversion function
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -87,6 +113,8 @@ def main():
                 success = True
             else:
                 print(f"ERROR: {error_str}")
+                import traceback
+                traceback.print_exc()
                 success = False
         
         return success
