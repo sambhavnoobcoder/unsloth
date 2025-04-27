@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Test conversion of vision models to GGUF format (fixed)
+Test conversion of vision models to GGUF format (with public model)
 """
 
 import os
@@ -25,21 +25,22 @@ def main():
         print("Using HF_TOKEN from environment")
         hf_login(token=token)
     
-    # Use an existing vision model
-    model_name = "unsloth/Llama-3.1-11B-Vision-Instruct-bnb-4bit"
+    # *** IMPORTANT: Use a small, public vision model that doesn't require a token ***
+    # This is a multimodal vision model that shouldn't require a token
+    model_name = "microsoft/phi-3-vision-128k-instruct"
     print(f"Testing with vision model: {model_name}")
     
     # Create temporary directory for saving GGUF
     with tempfile.TemporaryDirectory() as temp_dir:
         output_dir = os.path.join(temp_dir, "test_vision_model")
         
-        # Load the model - using FastModel instead of FastVisionModel
+        # Load the model
         print("Loading model...")
         model, tokenizer = FastModel.from_pretrained(
             model_name=model_name,
             max_seq_length=2048,
             load_in_4bit=True,
-            token=token,
+            trust_remote_code=True,  # For phi models
         )
         
         # Save in GGUF format with q8_0 quantization
