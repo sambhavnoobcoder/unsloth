@@ -36,9 +36,10 @@ class MockVisionModel:
                 
         self.config = Config()
 
-    def save_pretrained(self, *args, **kwargs):
+    # Ensure save_pretrained matches the expected signature
+    def save_pretrained(self, save_directory=None, **kwargs):
         """Save the model to a directory."""
-        directory = kwargs.get("save_directory", args[0] if args else "temp_dir")
+        directory = save_directory or kwargs.get("save_directory")
         os.makedirs(directory, exist_ok=True)
         # Save a minimal config file
         with open(os.path.join(directory, "config.json"), "w") as f:
@@ -49,7 +50,7 @@ class MockVisionModel:
             }, f)
         return directory
         
-# More complete mock tokenizer
+# More complete mock tokenizer with MATCHING ARGUMENT NAMES
 class MockTokenizer:
     def __init__(self):
         # Add all commonly required tokenizer attributes
@@ -68,8 +69,13 @@ class MockTokenizer:
         self.special_tokens_map_file = "special_tokens_map.json"
         self.tokenizer_config_file = "tokenizer_config.json"
         
-    def save_pretrained(self, directory):
+    # Must match the exact signature expected by unsloth_save_model
+    def save_pretrained(self, save_directory=None, **kwargs):
         """Save the tokenizer to a directory."""
+        directory = save_directory or kwargs.get("save_directory")
+        if not directory:
+            raise ValueError("No save_directory specified")
+            
         os.makedirs(directory, exist_ok=True)
         
         # Save tokenizer config
