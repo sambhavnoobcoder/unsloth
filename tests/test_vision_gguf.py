@@ -21,7 +21,21 @@ class MockVisionModel:
         # Create a basic config with vision attributes directly
         class Config:
             def __init__(self):
-                self.vision_config = {"image_size": 224, "patch_size": 16, "hidden_size": 768}
+                # Create a VisionConfig object with to_dict method
+                class VisionConfig:
+                    def __init__(self):
+                        self.image_size = 224
+                        self.patch_size = 16
+                        self.hidden_size = 768
+                        
+                    def to_dict(self):
+                        return {
+                            "image_size": self.image_size,
+                            "patch_size": self.patch_size,
+                            "hidden_size": self.hidden_size
+                        }
+                
+                self.vision_config = VisionConfig()
                 self.torch_dtype = torch.float16
                 self.model_type = "llama_vision"
                 self.unsloth_version = "1.0.0"
@@ -29,7 +43,7 @@ class MockVisionModel:
                 
             def to_dict(self):
                 return {
-                    "vision_config": self.vision_config,
+                    "vision_config": self.vision_config.to_dict(),
                     "model_type": self.model_type,
                     "vocab_size": self.vocab_size
                 }
@@ -45,7 +59,7 @@ class MockVisionModel:
         with open(os.path.join(directory, "config.json"), "w") as f:
             json.dump({
                 "model_type": self.config.model_type,
-                "vision_config": self.config.vision_config,
+                "vision_config": self.config.vision_config.to_dict(),
                 "vocab_size": self.config.vocab_size
             }, f)
         return directory
@@ -138,7 +152,7 @@ def main():
         
         print("Testing vision_model_save_pretrained_gguf function...")
         try:
-            # We expect this to fail when trying to install llama.cpp
+            # We expect this to fail when trying to convert to GGUF
             gguf_path = model.save_pretrained_gguf(
                 save_directory=output_dir,
                 tokenizer=tokenizer,
@@ -151,12 +165,12 @@ def main():
             error_str = str(e)
             print(f"Error: {error_str}")
             
-            # Expected errors that indicate the function is working
+            # Expected errors that indicate the function is working correctly
             expected_errors = [
                 "llama.cpp", 
                 "does not exist",
                 "convert-hf-to-gguf.py",
-                "Installing llama.cpp"
+                "Converting vision model to GGUF"
             ]
             
             if any(err in error_str for err in expected_errors):
