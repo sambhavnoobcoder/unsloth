@@ -23,8 +23,11 @@ class TestVisionGGUF(unittest.TestCase):
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_vision_gguf_conversion(self):
         """Test converting a vision model to GGUF format"""
-        # Use a small vision model for testing
-        model_name = "unsloth/Llama-3.2-1B-Vision-Instruct-bnb-4bit"
+        # Use an existing vision model for testing - Llama 3.1 Vision
+        model_name = "unsloth/Llama-3.1-11B-Vision-Instruct-bnb-4bit"
+        # Alternatively try: model_name = "unsloth/llama-3.1-11b-vision-bnb-4bit"
+        
+        print(f"Testing with vision model: {model_name}")
         
         with tempfile.TemporaryDirectory() as temp_dir:
             # Load the model
@@ -32,7 +35,9 @@ class TestVisionGGUF(unittest.TestCase):
                 model_name=model_name,
                 max_seq_length=2048,
                 dtype=torch.bfloat16,
-                load_in_4bit=True
+                load_in_4bit=True,
+                # If you have a token, you can use it here
+                # token="your_hf_token_here"
             )
             
             # Save the model in GGUF format
