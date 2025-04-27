@@ -15,6 +15,15 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import unsloth
+import unsloth.models.loader as _loader
+
+# Monkey-patch compile_transformers to avoid None return unpacking error
+def _compile_transformers_stub(*args, **kwargs):
+    # Return default tuple when original returns None
+    return None, False
+_loader.unsloth_compile_transformers = _compile_transformers_stub
+
 from unsloth import FastModel
 from huggingface_hub import login as hf_login
 
