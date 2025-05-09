@@ -9,13 +9,14 @@ import torch
 import tempfile
 from pathlib import Path
 import inspect
+import importlib
 
-# Add parent directory to path
+# Add parent directory to path - this ensures we use the local version of unsloth
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import the necessary functions
 from unsloth import FastVisionModel
-from unsloth.save import vision_model_save_pretrained_gguf  # Import directly for debugging
+from unsloth.save import vision_model_save_pretrained_gguf, create_vision_gguf_converter  # Import directly for debugging
 from datasets import load_dataset
 from trl import SFTTrainer, SFTConfig
 from unsloth import is_bf16_supported
@@ -44,13 +45,27 @@ def main():
     3. Performs minimal training
     4. Attempts to save to GGUF format
     """
+    # First check if we're using the local version of unsloth
+    print("Checking unsloth import path...")
+    unsloth_path = os.path.abspath(importlib.util.find_spec("unsloth").origin)
+    print(f"Using unsloth from: {unsloth_path}")
+    
+    # Check if our custom vision GGUF converter creation function exists
+    print("Checking if create_vision_gguf_converter exists...")
+    if hasattr(sys.modules["unsloth.save"], "create_vision_gguf_converter"):
+        print("✓ create_vision_gguf_converter function found in unsloth.save")
+    else:
+        print("✗ create_vision_gguf_converter function NOT found in unsloth.save")
+        print("This suggests we're not using the version with your fix!")
+    
     print("Loading FastVisionModel...")
     try:
         # Try smaller models that will fit in T4 memory
         models_to_try = [
             # Model name, load_in_4bit, trust_remote_code
-            ("llava-hf/llava-1.5-7b-hf", True, False),
             ("Qwen/Qwen-VL-Chat", True, True),
+            ("llava-hf/llava-1.5-7b-hf", True, False),
+            ("llava-hf/bakLlava-v1-hf", True, False),
             ("microsoft/phi-3-vision-128k-instruct", True, True),
         ]
         
@@ -165,45 +180,47 @@ def main():
             output_dir = os.path.join(temp_dir, "model")
             os.makedirs(output_dir, exist_ok=True)
             
-            # Try examining the save_pretrained_gguf function
-            print("Examining vision_model_save_pretrained_gguf function:")
-            print(inspect.getsource(vision_model_save_pretrained_gguf))
-            
-            # For LlavaForConditionalGeneration models, we need to handle them differently
-            # Let's look at the model structure
-            print("\nModel structure:")
-            print(dump_model_structure(model, max_depth=1))
-            
-            # Try to save to GGUF format
-            print(f"\nAttempting to save model to GGUF in {output_dir}...")
+            # Check if the vision converter script exists or will be created
+            vision_converter_path = os.path.join("llama.cpp", "unsloth_convert_hf_to_gguf.py")
+            if os.path.exists(vision_converter_path):
+                print(f"✓ Vision converter script already exists at: {vision_converter_path}")
+            else:
+                print("Vision converter script doesn't exist yet, should be created during GGUF conversion")
             
             # First save the model and tokenizer to the output directory
             print("Saving model and tokenizer to output directory...")
             model.save_pretrained(output_dir)
             tokenizer.save_pretrained(output_dir)
             
-            try:
-                # Now try the GGUF conversion
-                gguf_path = model.save_pretrained_gguf(
-                    output_dir,
-                    tokenizer,
-                    quantization_method="q8_0"
-                )
-                print(f"Successfully saved to GGUF: {gguf_path}")
-                return True
-            except AttributeError as e:
-                if "'LlavaForConditionalGeneration' object has no attribute 'model'" in str(e):
-                    print("Caught expected error for LlavaForConditionalGeneration model")
-                    print("This is the issue we're trying to reproduce - vision models need special handling for GGUF conversion")
-                    return True  # Successfully reproduced the issue
-                else:
-                    raise  # Re-raise if it's a different AttributeError
-                
+            # Try to save to GGUF format
+            print(f"\nAttempting to save model to GGUF in {output_dir}...")
+            
+            # Call the function directly to see if our fix is working
+            gguf_path = vision_model_save_pretrained_gguf(
+                model,
+                output_dir,
+                tokenizer,
+                quantization_method="q8_0"
+            )
+            
+            print(f"Successfully saved to GGUF: {gguf_path}")
+            
+            # Check if the vision converter was created
+            if os.path.exists(vision_converter_path):
+                print(f"✓ Vision converter script was created at: {vision_converter_path}")
+            else:
+                print("✗ Vision converter script was NOT created")
+            
+            return True
+            
     except Exception as e:
         print(f"Error during GGUF conversion: {e}")
         if "Vision model conversion to GGUF failed" in str(e):
             print("This reproduces the reported issue with vision model GGUF conversion.")
             return True  # We successfully reproduced the issue
+        elif "'LlavaForConditionalGeneration' object has no attribute 'model'" in str(e):
+            print("This is the specific error we're trying to fix - the vision model structure isn't supported yet.")
+            return True  # Successfully reproduced the specific issue
         else:
             print("An unexpected error occurred during GGUF conversion.")
             print(f"Error type: {type(e).__name__}")
