@@ -1097,53 +1097,42 @@ def patch_model_for_vision(model_path, model, params):
             
             converter_code = converter_code[:insert_position] + vision_call + converter_code[insert_position:]
     
-    # Fix the parse_args function to properly handle model metadata
-    # First, find the parse_args function
-    parse_args_pattern = r"(def parse_args\(\):[^\n]*\n(?:[ \t]+[^\n]*\n)*)"
-    parse_args_match = re.search(parse_args_pattern, converter_code)
+    # Add model metadata argument to the argparse
+    argparse_pattern = r"(parser\.add_argument\([^)]*\)[\s\n]*$)"
+    arg_match = re.search(argparse_pattern, converter_code, re.MULTILINE)
     
-    if parse_args_match:
-        parse_args_code = parse_args_match.group(1)
+    if arg_match:
+        insert_position = arg_match.end()
+        metadata_arg = """
+    parser.add_argument("--model-metadata", type=str, help="Additional model metadata as JSON string")
+"""
+        converter_code = converter_code[:insert_position] + metadata_arg + converter_code[insert_position:]
+    
+    # Process metadata argument - ensure params is defined first
+    args_parse_pattern = r"(\s+)args\s*=\s*parser\.parse_args\(\)"
+    args_match = re.search(args_parse_pattern, converter_code)
+    
+    if args_match:
+        indent = args_match.group(1)
+        insert_position = args_match.end()
         
-        # Add model metadata argument to the argparse
-        parser_add_arg_pattern = r"([ \t]+parser\.add_argument\([^)]*\)[^\n]*\n)(?![ \t]+parser\.add_argument)"
-        last_arg_match = re.search(parser_add_arg_pattern, parse_args_code)
-        
-        if last_arg_match:
-            indent = re.match(r"([ \t]+)", last_arg_match.group(1)).group(1)
-            insert_position = parse_args_match.start() + last_arg_match.end()
-            
-            metadata_arg = f"{indent}parser.add_argument(\"--model-metadata\", type=str, help=\"Additional model metadata as JSON string\")\n"
-            
-            # Insert the new argument
-            converter_code = converter_code[:insert_position] + metadata_arg + converter_code[insert_position:]
-            
-            # Now find where args are returned and add metadata processing
-            args_return_pattern = r"([ \t]+return args\n)"
-            args_return_match = re.search(args_return_pattern, converter_code)
-            
-            if args_return_match:
-                indent = re.match(r"([ \t]+)", args_return_match.group(1)).group(1)
-                insert_position = args_return_match.start()
-                
-                # Add code to process model metadata before returning args
-                metadata_process = f"""
-{indent}# Initialize params dictionary for metadata if it doesn't exist
-{indent}if not hasattr(args, 'params'):
-{indent}    args.params = {{}}\n
+        # Make sure params is defined before we use it
+        metadata_process = f"""
 {indent}# Process model metadata if provided
-{indent}if args.model_metadata:
+{indent}if hasattr(args, 'model_metadata') and args.model_metadata:
 {indent}    try:
+{indent}        # Make sure params exists
+{indent}        if 'params' not in locals():
+{indent}            params = {{}};
 {indent}        model_metadata = json.loads(args.model_metadata)
 {indent}        for key, value in model_metadata.items():
-{indent}            args.params[f"unsloth.{{key}}"] = value
+{indent}            params[f"unsloth.{{key}}"] = value
 {indent}    except json.JSONDecodeError:
 {indent}        print(f"Warning: Could not parse model metadata: {{args.model_metadata}}")
 {indent}    except Exception as e:
 {indent}        print(f"Warning: Error processing model metadata: {{e}}")
-\n"""
-                
-                converter_code = converter_code[:insert_position] + metadata_process + converter_code[insert_position:]
+"""
+        converter_code = converter_code[:insert_position] + metadata_process + converter_code[insert_position:]
     
     # Add more robust config loading
     load_hparams_pattern = r"(def load_hparams\([^)]*\):[\s\S]*?)(return .*?)$"
@@ -2877,31 +2866,52 @@ def vision_model_save_pretrained_gguf(
         config_path = os.path.join(new_save_directory, "config.json")
         if not os.path.exists(config_path):
             print("Unsloth: config.json not found, creating it...")
-            model_config = self.config.to_dict()
+            model_config = self.config.to_dict() if hasattr(self.config, "to_dict") else {}
             
             # Ensure model_type is set
             if "model_type" not in model_config:
                 if hasattr(self, "vision_tower"):
                     model_config["model_type"] = "llava"
+                elif hasattr(self.config, "model_type"):
+                    model_config["model_type"] = self.config.model_type
                 else:
                     model_config["model_type"] = "llama"
             
+            # Ensure essential fields are present
+            if "vocab_size" not in model_config and hasattr(self.config, "vocab_size"):
+                model_config["vocab_size"] = self.config.vocab_size
+            elif "vocab_size" not in model_config:
+                model_config["vocab_size"] = 32000
+                
+            # Save the config file
             with open(config_path, "w") as f:
                 json.dump(model_config, f, indent=2)
+            print(f"Unsloth: Created config.json with model_type: {model_config.get('model_type', 'unknown')}")
         else:
             # Read and update existing config
-            with open(config_path, "r") as f:
-                model_config = json.load(f)
-            
-            # Ensure model_type is set
-            if "model_type" not in model_config:
-                if hasattr(self, "vision_tower"):
-                    model_config["model_type"] = "llava"
-                else:
-                    model_config["model_type"] = "llama"
+            try:
+                with open(config_path, "r") as f:
+                    model_config = json.load(f)
                 
+                # Ensure model_type is set
+                if "model_type" not in model_config:
+                    if hasattr(self, "vision_tower"):
+                        model_config["model_type"] = "llava"
+                    elif hasattr(self.config, "model_type"):
+                        model_config["model_type"] = self.config.model_type
+                    else:
+                        model_config["model_type"] = "llama"
+                    
+                    with open(config_path, "w") as f:
+                        json.dump(model_config, f, indent=2)
+                    print(f"Unsloth: Updated config.json with model_type: {model_config.get('model_type', 'unknown')}")
+            except Exception as e:
+                print(f"Unsloth: Warning - Error updating config.json: {e}")
+                # Create a new config if reading failed
+                model_config = {"model_type": "llava" if hasattr(self, "vision_tower") else "llama"}
                 with open(config_path, "w") as f:
                     json.dump(model_config, f, indent=2)
+                print(f"Unsloth: Created new config.json with model_type: {model_config.get('model_type', 'unknown')}")
         
         print(f"Unsloth: Saved model to {new_save_directory}. Now converting to GGUF...")
         
@@ -3007,25 +3017,21 @@ def vision_model_save_pretrained_gguf(
             f"--outfile {final_location} "\
             f"--outtype {quantization_method}"
         
-        # Add model metadata separately to avoid JSON escaping issues
-        if os.path.exists(os.path.join(new_save_directory, "vision_config.json")):
-            print("Unsloth: Using vision config metadata")
-            command += f" --model-metadata=\"{{\\\"is_vision_model\\\": true}}\""
-        
+        # First try without the metadata flag which might cause issues
+        print("Unsloth: Attempting GGUF conversion (basic approach)...")
         try:
-            print(f"Unsloth: Running conversion command: {command}")
             try_execute([command], force_complete=True)
         except Exception as e:
-            print(f"Unsloth: Error during GGUF conversion: {e}")
-            print("Trying alternative conversion approach...")
+            print(f"Unsloth: Basic conversion approach failed: {e}")
+            print("Unsloth: Trying with model metadata flag...")
             
-            # Try with a more basic command without the metadata
-            command = f"python {convert_location} {new_save_directory} "\
-                f"--outfile {final_location} "\
-                f"--outtype {quantization_method}"
-            
-            print(f"Unsloth: Running simplified command: {command}")
-            try_execute([command], force_complete=True)
+            # Try with metadata flag
+            command_with_metadata = f"{command} --model-metadata '{{\"is_vision_model\": true}}'"
+            try:
+                try_execute([command_with_metadata], force_complete=True)
+            except Exception as e:
+                print(f"Unsloth: Error with metadata flag: {e}")
+                raise RuntimeError(f"Unsloth: Vision model conversion to GGUF failed for {final_location}")
         
         # Check if conversion succeeded
         if not os.path.isfile(final_location):
