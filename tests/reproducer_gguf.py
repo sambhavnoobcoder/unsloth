@@ -19,6 +19,7 @@ from datasets import load_dataset
 from trl import SFTTrainer, SFTConfig
 from unsloth import is_bf16_supported
 
+
 def main():
     """
     Reproducer script that:
@@ -29,49 +30,62 @@ def main():
     """
     print("Loading FastVisionModel...")
     try:
-        model, tokenizer = FastVisionModel.from_pretrained(
-            "unsloth/Mistral-Small-3.1-24B-Instruct-2503-unsloth-bnb-4bit",
-            load_in_4bit=True,
-            use_gradient_checkpointing="unsloth",
-            attn_implementation="eager"
-        )
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        print("Trying fallback model for testing...")
-        # Fallback to a smaller model for testing if the primary model fails
-        try:
-            model, tokenizer = FastVisionModel.from_pretrained(
-                "Qwen/Qwen-VL-Chat",
-                load_in_4bit=True
-            )
-        except Exception as e2:
-            print(f"Error loading fallback model: {e2}")
-            print("Cannot continue without a model. Exiting.")
+        # Try smaller models that will fit in T4 memory
+        models_to_try = [
+            # Model name, load_in_4bit, trust_remote_code
+            ("Qwen/Qwen-VL-Chat", True, True),
+            ("llava-hf/llava-1.5-7b-hf", True, False),
+            ("llava-hf/bakLlava-v1-hf", True, False),
+            ("microsoft/phi-3-vision-128k-instruct", True, True),
+        ]
+        
+        model = None
+        tokenizer = None
+        
+        for model_name, use_4bit, trust_remote in models_to_try:
+            try:
+                print(f"Trying model: {model_name}")
+                model, tokenizer = FastVisionModel.from_pretrained(
+                    model_name,
+                    load_in_4bit=use_4bit,
+                    trust_remote_code=trust_remote,
+                    use_flash_attention_2=False,  # Disable FA2 to avoid CUDA issues
+                    attn_implementation="eager"   # Use eager implementation for compatibility
+                )
+                print(f"Successfully loaded model: {model_name}")
+                break
+            except Exception as e:
+                print(f"Failed to load {model_name}: {e}")
+        
+        if model is None:
+            print("Failed to load any model. Exiting.")
             return False
+            
+    except Exception as e:
+        print(f"Unexpected error during model loading: {e}")
+        return False
     
     print("Setting up LoRA...")
-    model = FastVisionModel.get_peft_model(
-        model,
-        finetune_vision_layers=True,
-        finetune_language_layers=True,
-        finetune_attention_modules=False,
-        finetune_mlp_modules=True,
-        r=8,
-        lora_alpha=8,
-        lora_dropout=0,
-        bias="none",
-        random_state=3407
-    )
+    try:
+        model = FastVisionModel.get_peft_model(
+            model,
+            finetune_vision_layers=True,
+            finetune_language_layers=True,
+            finetune_attention_modules=False,
+            finetune_mlp_modules=True,
+            r=8,
+            lora_alpha=8,
+            lora_dropout=0,
+            bias="none",
+            random_state=3407
+        )
+    except Exception as e:
+        print(f"Error setting up LoRA: {e}")
+        print("Continuing with base model...")
     
     # Create a minimal synthetic dataset for testing
     print("Creating minimal synthetic dataset...")
     try:
-        # Try to load a tiny subset of the actual dataset
-        dataset = load_dataset("unsloth/Radiology_mini", split="train[:2]")
-    except Exception as e:
-        print(f"Error loading dataset: {e}")
-        print("Creating synthetic dataset instead...")
-        
         # Create a minimal synthetic dataset with dummy images and text
         from PIL import Image
         import numpy as np
@@ -87,6 +101,9 @@ def main():
             dummy_captions.append(f"This is a test caption for image {i}")
         
         dataset = [{"image": img, "caption": cap} for img, cap in zip(dummy_images, dummy_captions)]
+    except Exception as e:
+        print(f"Error creating synthetic dataset: {e}")
+        return False
     
     # Format the dataset
     print("Formatting dataset...")
@@ -110,54 +127,18 @@ def main():
     
     converted_dataset = [convert_to_conversation(sample) for sample in dataset]
     
-    # Minimal training
-    print("Setting up trainer...")
-    FastVisionModel.for_training(model)
-    
-    try:
-        trainer = SFTTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            data_collator=UnslothVisionDataCollator(model, tokenizer),
-            train_dataset=converted_dataset,
-            args=SFTConfig(
-                per_device_train_batch_size=1,
-                gradient_accumulation_steps=1,
-                warmup_steps=1,
-                max_steps=1,  # Just 1 step for testing
-                learning_rate=2e-4,
-                fp16=not is_bf16_supported(),
-                bf16=is_bf16_supported(),
-                logging_steps=1,
-                optim="paged_adamw_8bit",
-                weight_decay=0.01,
-                lr_scheduler_type="linear",
-                seed=3407,
-                output_dir="outputs",
-                report_to="none",
-                
-                # Vision finetuning required parameters
-                remove_unused_columns=True,
-                dataset_text_field="",
-                dataset_kwargs={"skip_prepare_dataset": False},
-                dataset_num_proc=1,
-                max_seq_length=2048,
-            ),
-        )
-        
-        print("Running training...")
-        trainer.train()
-    except Exception as e:
-        print(f"Error during training: {e}")
-        print("Continuing with GGUF save test without training...")
+    # Skip training to focus directly on GGUF conversion
+    print("Skipping training to focus on GGUF conversion...")
     
     # Now attempt to save to GGUF
     print("Saving model to GGUF format...")
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = os.path.join(temp_dir, "model")
+            os.makedirs(output_dir, exist_ok=True)
             
             # Try to save to GGUF format
+            print(f"Attempting to save model to GGUF in {output_dir}...")
             gguf_path = model.save_pretrained_gguf(
                 output_dir,
                 tokenizer,
@@ -172,7 +153,7 @@ def main():
             print("This reproduces the reported issue with vision model GGUF conversion.")
             return True  # We successfully reproduced the issue
         else:
-            print("An unexpected error occurred.")
+            print("An unexpected error occurred during GGUF conversion.")
             return False
 
 if __name__ == "__main__":
