@@ -1097,35 +1097,53 @@ def patch_model_for_vision(model_path, model, params):
             
             converter_code = converter_code[:insert_position] + vision_call + converter_code[insert_position:]
     
-    # Add model metadata argument to the argparse
-    argparse_pattern = r"(parser\.add_argument\([^)]*\)[\s\n]*$)"
-    arg_match = re.search(argparse_pattern, converter_code, re.MULTILINE)
+    # Fix the parse_args function to properly handle model metadata
+    # First, find the parse_args function
+    parse_args_pattern = r"(def parse_args\(\):[^\n]*\n(?:[ \t]+[^\n]*\n)*)"
+    parse_args_match = re.search(parse_args_pattern, converter_code)
     
-    if arg_match:
-        insert_position = arg_match.end()
-        metadata_arg = """
-    parser.add_argument("--model-metadata", type=str, help="Additional model metadata as JSON string")
-"""
-        converter_code = converter_code[:insert_position] + metadata_arg + converter_code[insert_position:]
-    
-    # Process metadata argument
-    args_parse_pattern = r"(\s+)args\s*=\s*parser\.parse_args\(\)"
-    args_match = re.search(args_parse_pattern, converter_code)
-    
-    if args_match:
-        indent = args_match.group(1)
-        insert_position = args_match.end()
-        metadata_process = f"""
+    if parse_args_match:
+        parse_args_code = parse_args_match.group(1)
+        
+        # Add model metadata argument to the argparse
+        parser_add_arg_pattern = r"([ \t]+parser\.add_argument\([^)]*\)[^\n]*\n)(?![ \t]+parser\.add_argument)"
+        last_arg_match = re.search(parser_add_arg_pattern, parse_args_code)
+        
+        if last_arg_match:
+            indent = re.match(r"([ \t]+)", last_arg_match.group(1)).group(1)
+            insert_position = parse_args_match.start() + last_arg_match.end()
+            
+            metadata_arg = f"{indent}parser.add_argument(\"--model-metadata\", type=str, help=\"Additional model metadata as JSON string\")\n"
+            
+            # Insert the new argument
+            converter_code = converter_code[:insert_position] + metadata_arg + converter_code[insert_position:]
+            
+            # Now find where args are returned and add metadata processing
+            args_return_pattern = r"([ \t]+return args\n)"
+            args_return_match = re.search(args_return_pattern, converter_code)
+            
+            if args_return_match:
+                indent = re.match(r"([ \t]+)", args_return_match.group(1)).group(1)
+                insert_position = args_return_match.start()
+                
+                # Add code to process model metadata before returning args
+                metadata_process = f"""
+{indent}# Initialize params dictionary for metadata if it doesn't exist
+{indent}if not hasattr(args, 'params'):
+{indent}    args.params = {{}}\n
 {indent}# Process model metadata if provided
 {indent}if args.model_metadata:
 {indent}    try:
 {indent}        model_metadata = json.loads(args.model_metadata)
 {indent}        for key, value in model_metadata.items():
-{indent}            params[f"unsloth.{{key}}"] = value
+{indent}            args.params[f"unsloth.{{key}}"] = value
 {indent}    except json.JSONDecodeError:
 {indent}        print(f"Warning: Could not parse model metadata: {{args.model_metadata}}")
-"""
-        converter_code = converter_code[:insert_position] + metadata_process + converter_code[insert_position:]
+{indent}    except Exception as e:
+{indent}        print(f"Warning: Error processing model metadata: {{e}}")
+\n"""
+                
+                converter_code = converter_code[:insert_position] + metadata_process + converter_code[insert_position:]
     
     # Add more robust config loading
     load_hparams_pattern = r"(def load_hparams\([^)]*\):[\s\S]*?)(return .*?)$"
@@ -2987,10 +3005,15 @@ def vision_model_save_pretrained_gguf(
         # Run the conversion with vision model flag
         command = f"python {convert_location} {new_save_directory} "\
             f"--outfile {final_location} "\
-            f"--outtype {quantization_method} "\
-            f"--model-metadata '{{\"is_vision_model\": true}}'"
+            f"--outtype {quantization_method}"
+        
+        # Add model metadata separately to avoid JSON escaping issues
+        if os.path.exists(os.path.join(new_save_directory, "vision_config.json")):
+            print("Unsloth: Using vision config metadata")
+            command += f" --model-metadata=\"{{\\\"is_vision_model\\\": true}}\""
         
         try:
+            print(f"Unsloth: Running conversion command: {command}")
             try_execute([command], force_complete=True)
         except Exception as e:
             print(f"Unsloth: Error during GGUF conversion: {e}")
@@ -3001,6 +3024,7 @@ def vision_model_save_pretrained_gguf(
                 f"--outfile {final_location} "\
                 f"--outtype {quantization_method}"
             
+            print(f"Unsloth: Running simplified command: {command}")
             try_execute([command], force_complete=True)
         
         # Check if conversion succeeded
