@@ -968,6 +968,7 @@ def create_vision_gguf_converter():
 # Unsloth Vision Model Support
 import json
 import re
+import os
 
 def is_vision_model(model_path):
     \"\"\"Check if the model is a vision model by looking for vision_config.json or model metadata\"\"\"
@@ -976,20 +977,37 @@ def is_vision_model(model_path):
     
     # Check for our custom vision config file
     if os.path.exists(vision_config_path):
+        print("    Found vision_config.json - treating as vision model")
         return True
     
     # Check model config for vision indicators
     if os.path.exists(config_path):
-        with open(config_path, "r") as f:
-            config = json.load(f)
-            
-            # Check for vision indicators in the config
-            if "vision_config" in config:
-                return True
-            if "architectures" in config:
-                for arch in config["architectures"]:
-                    if any(x in arch for x in ["Vision", "vision", "Clip", "CLIP", "Siglip"]):
-                        return True
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+                
+                # Check for vision indicators in the config
+                if "vision_config" in config:
+                    print("    Found vision_config in config.json - treating as vision model")
+                    return True
+                    
+                if "model_type" in config and config["model_type"] in ["llava", "vision", "clip"]:
+                    print(f"    Found vision model_type: {config['model_type']}")
+                    return True
+                    
+                if "architectures" in config:
+                    for arch in config["architectures"]:
+                        if any(x in arch for x in ["Vision", "vision", "Clip", "CLIP", "Siglip", "Llava"]):
+                            print(f"    Found vision architecture: {arch}")
+                            return True
+        except Exception as e:
+            print(f"    Error reading config.json: {e}")
+    
+    # Look for vision-related files
+    for filename in os.listdir(model_path):
+        if any(x in filename.lower() for x in ["vision", "clip", "image", "llava"]):
+            print(f"    Found vision-related file: {filename}")
+            return True
     
     return False
 """
@@ -1011,16 +1029,27 @@ def patch_model_for_vision(model_path, model, params):
     vision_config = {}
     
     if os.path.exists(config_path):
-        with open(config_path, "r") as f:
-            config = json.load(f)
-            if "vision_config" in config:
-                vision_config = config["vision_config"]
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+                if "vision_config" in config:
+                    vision_config = config["vision_config"]
+                # If model is Llava but doesn't have vision_config
+                elif "model_type" in config and config["model_type"] == "llava":
+                    vision_config = {"image_size": 336, "patch_size": 14, "hidden_size": 1024}
+        except Exception as e:
+            print(f"    Error reading config.json: {e}")
     
     # Check for our custom vision config
     vision_config_path = os.path.join(model_path, "vision_config.json")
     if os.path.exists(vision_config_path):
-        with open(vision_config_path, "r") as f:
-            vision_config = json.load(f)
+        try:
+            with open(vision_config_path, "r") as f:
+                vision_config = json.load(f)
+                if "vision_config" in vision_config:
+                    vision_config = vision_config["vision_config"]
+        except Exception as e:
+            print(f"    Error reading vision_config.json: {e}")
     
     # Add vision model config parameters
     for key, value in vision_config.items():
@@ -1098,12 +1127,70 @@ def patch_model_for_vision(model_path, model, params):
 """
         converter_code = converter_code[:insert_position] + metadata_process + converter_code[insert_position:]
     
+    # Add more robust config loading
+    load_hparams_pattern = r"(def load_hparams\([^)]*\):[\s\S]*?)(return .*?)$"
+    load_hparams_match = re.search(load_hparams_pattern, converter_code, re.MULTILINE)
+    
+    if load_hparams_match:
+        existing_code = load_hparams_match.group(1)
+        return_statement = load_hparams_match.group(2)
+        
+        # Add fallback for handling config.json directly
+        fallback_code = """
+        # Unsloth: Add fallback for vision models
+        try:
+            config_path = os.path.join(dir_model, "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                
+                # Ensure model_type is set for vision models
+                if "model_type" not in config:
+                    if is_vision_model(dir_model):
+                        config["model_type"] = "llava"
+                    else:
+                        config["model_type"] = "llama"
+                
+                return config
+        except Exception as e:
+            print(f"Warning: Error in config fallback: {e}")
+            pass
+        
+        # Create minimal config for vision models
+        if is_vision_model(dir_model):
+            print("Creating minimal config for vision model")
+            return {
+                "model_type": "llava",
+                "vocab_size": 32000,
+                "hidden_size": 4096,
+                "intermediate_size": 11008,
+                "num_hidden_layers": 32,
+                "num_attention_heads": 32,
+                "hidden_act": "silu",
+                "max_position_embeddings": 4096,
+                "bos_token_id": 1,
+                "eos_token_id": 2,
+                "pad_token_id": 0
+            }
+        """
+        
+        # Insert fallback before the return statement
+        converter_code = converter_code.replace(existing_code + return_statement, existing_code + fallback_code + "\n        " + return_statement)
+    
     # Write the modified converter
     with open(vision_converter_path, "w") as f:
         f.write(converter_code)
     
     print(f"Unsloth: Created vision-capable GGUF converter at {vision_converter_path}")
-pass
+    
+    # Make it executable
+    try:
+        import stat
+        st = os.stat(vision_converter_path)
+        os.chmod(vision_converter_path, st.st_mode | stat.S_IEXEC)
+        print(f"Unsloth: Made converter script executable")
+    except:
+        pass
 
 
 def get_executable(executables):
@@ -2768,6 +2855,36 @@ def vision_model_save_pretrained_gguf(
         self.save_pretrained(new_save_directory)
         tokenizer.save_pretrained(new_save_directory)
         
+        # Ensure config.json exists and has the right model_type
+        config_path = os.path.join(new_save_directory, "config.json")
+        if not os.path.exists(config_path):
+            print("Unsloth: config.json not found, creating it...")
+            model_config = self.config.to_dict()
+            
+            # Ensure model_type is set
+            if "model_type" not in model_config:
+                if hasattr(self, "vision_tower"):
+                    model_config["model_type"] = "llava"
+                else:
+                    model_config["model_type"] = "llama"
+            
+            with open(config_path, "w") as f:
+                json.dump(model_config, f, indent=2)
+        else:
+            # Read and update existing config
+            with open(config_path, "r") as f:
+                model_config = json.load(f)
+            
+            # Ensure model_type is set
+            if "model_type" not in model_config:
+                if hasattr(self, "vision_tower"):
+                    model_config["model_type"] = "llava"
+                else:
+                    model_config["model_type"] = "llama"
+                
+                with open(config_path, "w") as f:
+                    json.dump(model_config, f, indent=2)
+        
         print(f"Unsloth: Saved model to {new_save_directory}. Now converting to GGUF...")
         
         # Install llama.cpp if needed
@@ -2804,8 +2921,8 @@ def vision_model_save_pretrained_gguf(
             raise TypeError("Unsloth: Model dtype can only be float16 or bfloat16")
         
         # Add vision-specific config for conversion
-        config_file = os.path.join(new_save_directory, "vision_config.json")
-        with open(config_file, "w") as f:
+        vision_config_file = os.path.join(new_save_directory, "vision_config.json")
+        with open(vision_config_file, "w") as f:
             # Extract vision config based on model architecture
             if hasattr(self.config, "vision_config"):
                 # Standard case - config has vision_config attribute
@@ -2819,10 +2936,23 @@ def vision_model_save_pretrained_gguf(
             
             json.dump({
                 "is_vision_model": True,
-                "model_type": model_type,
+                "model_type": model_config.get("model_type", "llava"),
                 "vision_config": vision_config,
                 "unsloth_version": getattr(self.config, "unsloth_version", "unknown")
-            }, f)
+            }, f, indent=2)
+        
+        # Verify config files
+        print(f"Unsloth: Verifying config files...")
+        for config_file in ["config.json", "vision_config.json"]:
+            file_path = os.path.join(new_save_directory, config_file)
+            if os.path.exists(file_path):
+                print(f"  ✓ {config_file} exists")
+                # Print first few lines for debugging
+                with open(file_path, "r") as f:
+                    content = f.read(200)
+                    print(f"    Preview: {content[:100]}...")
+            else:
+                print(f"  ✗ {config_file} is missing!")
         
         # Find the appropriate conversion script
         convert_location = None
@@ -2858,9 +2988,20 @@ def vision_model_save_pretrained_gguf(
         command = f"python {convert_location} {new_save_directory} "\
             f"--outfile {final_location} "\
             f"--outtype {quantization_method} "\
-            f"--model-metadata '{{'is_vision_model':true}}'"
+            f"--model-metadata '{{\"is_vision_model\": true}}'"
         
-        try_execute([command], force_complete=True)
+        try:
+            try_execute([command], force_complete=True)
+        except Exception as e:
+            print(f"Unsloth: Error during GGUF conversion: {e}")
+            print("Trying alternative conversion approach...")
+            
+            # Try with a more basic command without the metadata
+            command = f"python {convert_location} {new_save_directory} "\
+                f"--outfile {final_location} "\
+                f"--outtype {quantization_method}"
+            
+            try_execute([command], force_complete=True)
         
         # Check if conversion succeeded
         if not os.path.isfile(final_location):
