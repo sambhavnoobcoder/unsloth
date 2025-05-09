@@ -2774,6 +2774,9 @@ def vision_model_save_pretrained_gguf(
             if makefile:
                 makefile[0].wait()
     
+    # Create a custom vision-capable converter if it doesn't exist
+    create_vision_gguf_converter()
+    
     # Determine model info
     model_dtype = self.config.torch_dtype
     model_type = self.config.model_type
@@ -2790,9 +2793,15 @@ def vision_model_save_pretrained_gguf(
     # Add vision-specific config for conversion
     config_file = os.path.join(new_save_directory, "vision_config.json")
     with open(config_file, "w") as f:
+        # Extract vision config based on model architecture
         if hasattr(self.config, "vision_config"):
+            # Standard case - config has vision_config attribute
             vision_config = self.config.vision_config.to_dict()
+        elif hasattr(self, "vision_tower") and hasattr(self.vision_tower, "config"):
+            # LlavaForConditionalGeneration case
+            vision_config = self.vision_tower.config.to_dict()
         else:
+            # Fallback - create minimal vision config
             vision_config = {"is_vision_model": True}
         
         json.dump({

@@ -192,12 +192,11 @@ def main():
             model.save_pretrained(output_dir)
             tokenizer.save_pretrained(output_dir)
             
-            # Try to save to GGUF format
+            # Try to save to GGUF format using model's method
             print(f"\nAttempting to save model to GGUF in {output_dir}...")
             
-            # Call the function directly to see if our fix is working
-            gguf_path = vision_model_save_pretrained_gguf(
-                model,
+            # Use the model's save_pretrained_gguf method which should now properly handle vision models
+            gguf_path = model.save_pretrained_gguf(
                 output_dir,
                 tokenizer,
                 quantization_method="q8_0"
