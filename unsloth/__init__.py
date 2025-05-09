@@ -226,3 +226,23 @@ from .trainer import *
 
 # Patch TRL trainers for backwards compatibility
 _patch_trl_trainer()
+
+# Ensure that FastVisionModel properly sets vision=True in patch_saving_functions
+original_from_pretrained = FastVisionModel.from_pretrained
+
+def patched_from_pretrained(*args, **kwargs):
+    model, tokenizer = original_from_pretrained(*args, **kwargs)
+    # Ensure the model is patched as a vision model
+    patch_saving_functions(model, vision=True)
+    return model, tokenizer
+
+FastVisionModel.from_pretrained = patched_from_pretrained
+
+__all__ = [
+    "FastLanguageModel",
+    "FastVisionModel",
+    "is_bf16_supported",
+    "UnslothTrainer",
+    "UnslothTrainerConfig",
+    "UnslothVisionDataCollator",
+]

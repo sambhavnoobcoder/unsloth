@@ -2687,8 +2687,11 @@ def patch_saving_functions(model, vision = False):
         else: break
     pass
 
+    # Determine if this is a vision model based on attributes
+    is_vision_model = vision or hasattr(model, "vision_tower") or (hasattr(model, "config") and hasattr(model.config, "vision_config"))
+    
     # Add saving methods to top level model
-    if not vision:
+    if not is_vision_model:
         if hasattr(model, "config"):
             # Counteract tokenizers
             model.push_to_hub_merged     = types.MethodType(unsloth_push_to_hub_merged,                    model)
@@ -2700,6 +2703,7 @@ def patch_saving_functions(model, vision = False):
         pass
     else:
         # Vision model saving methods
+        print("Unsloth: Detected vision model, attaching vision-specific GGUF conversion methods")
         model.push_to_hub_merged     = types.MethodType(unsloth_generic_push_to_hub_merged,     model)
         model.save_pretrained_merged = types.MethodType(unsloth_generic_save_pretrained_merged, model)
         model.push_to_hub_gguf       = types.MethodType(vision_model_push_to_hub_gguf,          model)

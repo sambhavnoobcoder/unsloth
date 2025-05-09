@@ -10,13 +10,14 @@ import tempfile
 from pathlib import Path
 import inspect
 import importlib
+import types
 
 # Add parent directory to path - this ensures we use the local version of unsloth
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import the necessary functions
 from unsloth import FastVisionModel
-from unsloth.save import vision_model_save_pretrained_gguf, create_vision_gguf_converter  # Import directly for debugging
+from unsloth.save import vision_model_save_pretrained_gguf, create_vision_gguf_converter, patch_saving_functions  # Import directly for debugging
 from datasets import load_dataset
 from trl import SFTTrainer, SFTConfig
 from unsloth import is_bf16_supported
@@ -195,14 +196,44 @@ def main():
             # Try to save to GGUF format using model's method
             print(f"\nAttempting to save model to GGUF in {output_dir}...")
             
-            # Use the model's save_pretrained_gguf method which should now properly handle vision models
-            gguf_path = model.save_pretrained_gguf(
-                output_dir,
-                tokenizer,
-                quantization_method="q8_0"
-            )
+            # Explicitly patch the model to ensure it has the vision-specific method
+            print("Explicitly patching model with vision-specific GGUF conversion method...")
+            patch_saving_functions(model, vision=True)
             
-            print(f"Successfully saved to GGUF: {gguf_path}")
+            # Check if the model has the save_pretrained_gguf method
+            if hasattr(model, 'save_pretrained_gguf'):
+                print("Model has save_pretrained_gguf method")
+                
+                # Try using the model's method first
+                try:
+                    gguf_path = model.save_pretrained_gguf(
+                        output_dir,
+                        tokenizer,
+                        quantization_method="q8_0"
+                    )
+                    print(f"Successfully saved to GGUF using model method: {gguf_path}")
+                except Exception as e:
+                    print(f"Error using model's method: {e}")
+                    print("Falling back to direct function call...")
+                    
+                    # Fall back to direct function call
+                    gguf_path = vision_model_save_pretrained_gguf(
+                        model,
+                        output_dir,
+                        tokenizer,
+                        quantization_method="q8_0"
+                    )
+                    print(f"Successfully saved to GGUF using direct function call: {gguf_path}")
+            else:
+                print("Model does NOT have save_pretrained_gguf method - using direct function call")
+                # Direct function call
+                gguf_path = vision_model_save_pretrained_gguf(
+                    model,
+                    output_dir,
+                    tokenizer,
+                    quantization_method="q8_0"
+                )
+                print(f"Successfully saved to GGUF: {gguf_path}")
             
             # Check if the vision converter was created
             if os.path.exists(vision_converter_path):
