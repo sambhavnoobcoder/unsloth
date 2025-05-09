@@ -44,6 +44,7 @@ except:
 pass
 from pathlib import Path
 import json
+import tempfile
 
 __all__ = [
     "print_quantization_methods",
@@ -2745,132 +2746,138 @@ def vision_model_save_pretrained_gguf(
     """
     if tokenizer is None:
         raise ValueError("Unsloth: Saving to GGUF must have a tokenizer.")
-        
+    
+    # Detect model type
+    is_llava = hasattr(self, "vision_tower") and not hasattr(self, "model")
+    model_type_name = type(self).__name__
+    print(f"Unsloth: Detected vision model type: {model_type_name}")
+    
+    if is_llava:
+        print("Unsloth: Using Llava-specific GGUF conversion path")
+    
     # First save the model in merged format
-    arguments = dict(locals())
-    arguments["model"] = self
-    arguments["tokenizer"] = tokenizer
-    arguments["push_to_hub"] = False  # We'll handle upload separately
-    arguments["save_method"] = "merged_16bit"  # Must be 16bit
-    del arguments["self"]
-    del arguments["quantization_method"]
-    del arguments["first_conversion"]
+    print("Unsloth: Saving model in HF format first...")
     
-    # Save the model in HF format first (same as regular models)
-    new_save_directory, old_username = unsloth_save_model(**arguments)
-    
-    print(f"Unsloth: Saved model to {new_save_directory}. Now converting to GGUF...")
-    
-    # Install llama.cpp if needed
-    if not os.path.exists("llama.cpp"):
-        print("Unsloth: Installing llama.cpp. This might take a few minutes...")
-        if IS_KAGGLE_ENVIRONMENT:
-            python_install = install_python_non_blocking(["gguf", "protobuf"])
-            python_install.wait()
-            install_llama_cpp_blocking(use_cuda=False)
-            makefile = None
-        else:
-            git_clone = install_llama_cpp_clone_non_blocking()
-            python_install = install_python_non_blocking(["gguf", "protobuf"])
-            git_clone.wait()
-            makefile = install_llama_cpp_make_non_blocking()
-            python_install.wait()
-            if makefile:
-                makefile[0].wait()
-    
-    # Create a custom vision-capable converter if it doesn't exist
-    create_vision_gguf_converter()
-    
-    # Determine model info
-    model_dtype = self.config.torch_dtype
-    model_type = self.config.model_type
-    
-    if type(model_dtype) is str:
-        assert(model_dtype == "float16" or model_dtype == "bfloat16")
-    elif model_dtype == torch.float16:
-        model_dtype = "float16"
-    elif model_dtype == torch.bfloat16:
-        model_dtype = "bfloat16"
-    else:
-        raise TypeError("Unsloth: Model dtype can only be float16 or bfloat16")
-    
-    # Add vision-specific config for conversion
-    config_file = os.path.join(new_save_directory, "vision_config.json")
-    with open(config_file, "w") as f:
-        # Extract vision config based on model architecture
-        if hasattr(self.config, "vision_config"):
-            # Standard case - config has vision_config attribute
-            vision_config = self.config.vision_config.to_dict()
-        elif hasattr(self, "vision_tower") and hasattr(self.vision_tower, "config"):
-            # LlavaForConditionalGeneration case
-            vision_config = self.vision_tower.config.to_dict()
-        else:
-            # Fallback - create minimal vision config
-            vision_config = {"is_vision_model": True}
+    # Save the model using standard HF save_pretrained
+    # We'll skip using unsloth_save_model since it might have assumptions about model structure
+    with tempfile.TemporaryDirectory() as temp_dir:
+        new_save_directory = os.path.join(temp_dir, "model")
+        os.makedirs(new_save_directory, exist_ok=True)
         
-        json.dump({
-            "is_vision_model": True,
-            "model_type": model_type,
-            "vision_config": vision_config,
-            "unsloth_version": getattr(self.config, "unsloth_version", "unknown")
-        }, f)
-    
-    # Find the appropriate conversion script
-    convert_location = None
-    if os.path.exists("llama.cpp/unsloth_convert_hf_to_gguf.py"):
-        convert_location = "llama.cpp/unsloth_convert_hf_to_gguf.py"
-    elif os.path.exists("llama.cpp/convert-hf-to-gguf.py"):
-        convert_location = "llama.cpp/convert-hf-to-gguf.py"
-    elif os.path.exists("llama.cpp/convert_hf_to_gguf.py"):
-        convert_location = "llama.cpp/convert_hf_to_gguf.py"
-    else:
-        raise RuntimeError(
-            "Unsloth: The file 'llama.cpp/convert-hf-to-gguf.py' or 'llama.cpp/convert_hf_to_gguf.py' does not exist.\n"\
-            "But we expect this file to exist! Maybe the llama.cpp developers changed the name?"
-        )
-    
-    # Set up parameters for GGUF conversion
-    if quantization_method == "not_quantized":  
-        quantization_method = "f16"
-    elif quantization_method == "fast_quantized": 
-        quantization_method = "q8_0"
-    elif quantization_method == "quantized":      
-        quantization_method = "q4_k_m"
-    elif quantization_method is None:             
-        quantization_method = "q8_0"
-    
-    # Create the output filename
-    final_location = str((Path(new_save_directory) / f"unsloth.{quantization_method.upper()}.gguf").absolute())
-    
-    print(f"Unsloth: Converting vision model to GGUF format ({quantization_method})...")
-    print(f"This might take several minutes depending on model size...")
-    
-    # Run the conversion with vision model flag
-    command = f"python {convert_location} {new_save_directory} "\
-        f"--outfile {final_location} "\
-        f"--outtype {quantization_method} "\
-        f"--model-metadata '{{'is_vision_model':true}}'"
-    
-    try_execute([command], force_complete=True)
-    
-    # Check if conversion succeeded
-    if not os.path.isfile(final_location):
-        raise RuntimeError(f"Unsloth: Vision model conversion to GGUF failed for {final_location}")
-    
-    print(f"Unsloth: Successfully converted vision model to GGUF format!")
-    print(f"Unsloth: Saved GGUF to {final_location}")
-    
-    # Upload to HF Hub if requested
-    if push_to_hub:
-        print("Unsloth: Uploading GGUF to Huggingface Hub...")
-        username = upload_to_huggingface(
-            self, save_directory, token,
-            "GGUF converted", "gguf", final_location, old_username, private,
-        )
-        link = f"{username}/{new_save_directory.lstrip('/.')}" \
-            if username not in new_save_directory else \
-            new_save_directory.lstrip('/.')
-        print(f"Saved GGUF to https://huggingface.co/{link}")
+        # Save model and tokenizer to the temporary directory
+        self.save_pretrained(new_save_directory)
+        tokenizer.save_pretrained(new_save_directory)
+        
+        print(f"Unsloth: Saved model to {new_save_directory}. Now converting to GGUF...")
+        
+        # Install llama.cpp if needed
+        if not os.path.exists("llama.cpp"):
+            print("Unsloth: Installing llama.cpp. This might take a few minutes...")
+            if IS_KAGGLE_ENVIRONMENT:
+                python_install = install_python_non_blocking(["gguf", "protobuf"])
+                python_install.wait()
+                install_llama_cpp_blocking(use_cuda=False)
+                makefile = None
+            else:
+                git_clone = install_llama_cpp_clone_non_blocking()
+                python_install = install_python_non_blocking(["gguf", "protobuf"])
+                git_clone.wait()
+                makefile = install_llama_cpp_make_non_blocking()
+                python_install.wait()
+                if makefile:
+                    makefile[0].wait()
+        
+        # Create a custom vision-capable converter if it doesn't exist
+        create_vision_gguf_converter()
+        
+        # Determine model info
+        model_dtype = self.config.torch_dtype
+        model_type = self.config.model_type
+        
+        if type(model_dtype) is str:
+            assert(model_dtype == "float16" or model_dtype == "bfloat16")
+        elif model_dtype == torch.float16:
+            model_dtype = "float16"
+        elif model_dtype == torch.bfloat16:
+            model_dtype = "bfloat16"
+        else:
+            raise TypeError("Unsloth: Model dtype can only be float16 or bfloat16")
+        
+        # Add vision-specific config for conversion
+        config_file = os.path.join(new_save_directory, "vision_config.json")
+        with open(config_file, "w") as f:
+            # Extract vision config based on model architecture
+            if hasattr(self.config, "vision_config"):
+                # Standard case - config has vision_config attribute
+                vision_config = self.config.vision_config.to_dict()
+            elif hasattr(self, "vision_tower") and hasattr(self.vision_tower, "config"):
+                # LlavaForConditionalGeneration case
+                vision_config = self.vision_tower.config.to_dict()
+            else:
+                # Fallback - create minimal vision config
+                vision_config = {"is_vision_model": True}
+            
+            json.dump({
+                "is_vision_model": True,
+                "model_type": model_type,
+                "vision_config": vision_config,
+                "unsloth_version": getattr(self.config, "unsloth_version", "unknown")
+            }, f)
+        
+        # Find the appropriate conversion script
+        convert_location = None
+        if os.path.exists("llama.cpp/unsloth_convert_hf_to_gguf.py"):
+            convert_location = "llama.cpp/unsloth_convert_hf_to_gguf.py"
+        elif os.path.exists("llama.cpp/convert-hf-to-gguf.py"):
+            convert_location = "llama.cpp/convert-hf-to-gguf.py"
+        elif os.path.exists("llama.cpp/convert_hf_to_gguf.py"):
+            convert_location = "llama.cpp/convert_hf_to_gguf.py"
+        else:
+            raise RuntimeError(
+                "Unsloth: The file 'llama.cpp/convert-hf-to-gguf.py' or 'llama.cpp/convert_hf_to_gguf.py' does not exist.\n"\
+                "But we expect this file to exist! Maybe the llama.cpp developers changed the name?"
+            )
+        
+        # Set up parameters for GGUF conversion
+        if quantization_method == "not_quantized":  
+            quantization_method = "f16"
+        elif quantization_method == "fast_quantized": 
+            quantization_method = "q8_0"
+        elif quantization_method == "quantized":      
+            quantization_method = "q4_k_m"
+        elif quantization_method is None:             
+            quantization_method = "q8_0"
+        
+        # Create the output filename
+        final_location = str((Path(save_directory) / f"unsloth.{quantization_method.upper()}.gguf").absolute())
+        
+        print(f"Unsloth: Converting vision model to GGUF format ({quantization_method})...")
+        print(f"This might take several minutes depending on model size...")
+        
+        # Run the conversion with vision model flag
+        command = f"python {convert_location} {new_save_directory} "\
+            f"--outfile {final_location} "\
+            f"--outtype {quantization_method} "\
+            f"--model-metadata '{{'is_vision_model':true}}'"
+        
+        try_execute([command], force_complete=True)
+        
+        # Check if conversion succeeded
+        if not os.path.isfile(final_location):
+            raise RuntimeError(f"Unsloth: Vision model conversion to GGUF failed for {final_location}")
+        
+        print(f"Unsloth: Successfully converted vision model to GGUF format!")
+        print(f"Unsloth: Saved GGUF to {final_location}")
+        
+        # Upload to HF Hub if requested
+        if push_to_hub:
+            print("Unsloth: Uploading GGUF to Huggingface Hub...")
+            username = upload_to_huggingface(
+                self, save_directory, token,
+                "GGUF converted", "gguf", final_location, None, private,
+            )
+            link = username + "/" + save_directory if username not in save_directory else save_directory
+            print(f"Saved GGUF to https://huggingface.co/{link}")
     
     return final_location
 

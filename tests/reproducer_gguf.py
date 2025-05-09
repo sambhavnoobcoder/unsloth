@@ -89,11 +89,12 @@ def main():
                 print("Model type:", type(model).__name__)
                 print("Model attributes:", [attr for attr in dir(model) if not attr.startswith('_')])
                 
-                # Check if it's a normal model structure
+                # Check model structure
                 if hasattr(model, 'model'):
                     print("Model has 'model' attribute")
                 elif hasattr(model, 'vision_tower'):
                     print("Model has 'vision_tower' attribute (LlavaForConditionalGeneration structure)")
+                    print("Vision tower type:", type(model.vision_tower).__name__)
                 else:
                     print("Model has neither 'model' nor 'vision_tower' attribute")
                 
@@ -204,36 +205,49 @@ def main():
             if hasattr(model, 'save_pretrained_gguf'):
                 print("Model has save_pretrained_gguf method")
                 
-                # Try using the model's method first
+                # Try direct function call first - most reliable approach
                 try:
-                    gguf_path = model.save_pretrained_gguf(
-                        output_dir,
-                        tokenizer,
-                        quantization_method="q8_0"
-                    )
-                    print(f"Successfully saved to GGUF using model method: {gguf_path}")
-                except Exception as e:
-                    print(f"Error using model's method: {e}")
-                    print("Falling back to direct function call...")
-                    
-                    # Fall back to direct function call
+                    print("Using direct function call to vision_model_save_pretrained_gguf...")
                     gguf_path = vision_model_save_pretrained_gguf(
                         model,
                         output_dir,
                         tokenizer,
                         quantization_method="q8_0"
                     )
-                    print(f"Successfully saved to GGUF using direct function call: {gguf_path}")
+                    print(f"Successfully saved to GGUF using direct function: {gguf_path}")
+                    return True
+                except Exception as e:
+                    print(f"Error using direct function call: {e}")
+                    
+                    # Try using the model's method as fallback
+                    try:
+                        print("Falling back to model's save_pretrained_gguf method...")
+                        gguf_path = model.save_pretrained_gguf(
+                            output_dir,
+                            tokenizer,
+                            quantization_method="q8_0"
+                        )
+                        print(f"Successfully saved to GGUF using model method: {gguf_path}")
+                        return True
+                    except Exception as e:
+                        print(f"Error using model's method: {e}")
+                        print("Both approaches failed.")
+                        return False
             else:
                 print("Model does NOT have save_pretrained_gguf method - using direct function call")
                 # Direct function call
-                gguf_path = vision_model_save_pretrained_gguf(
-                    model,
-                    output_dir,
-                    tokenizer,
-                    quantization_method="q8_0"
-                )
-                print(f"Successfully saved to GGUF: {gguf_path}")
+                try:
+                    gguf_path = vision_model_save_pretrained_gguf(
+                        model,
+                        output_dir,
+                        tokenizer,
+                        quantization_method="q8_0"
+                    )
+                    print(f"Successfully saved to GGUF: {gguf_path}")
+                    return True
+                except Exception as e:
+                    print(f"Error using direct function call: {e}")
+                    return False
             
             # Check if the vision converter was created
             if os.path.exists(vision_converter_path):
@@ -247,10 +261,10 @@ def main():
         print(f"Error during GGUF conversion: {e}")
         if "Vision model conversion to GGUF failed" in str(e):
             print("This reproduces the reported issue with vision model GGUF conversion.")
-            return True  # We successfully reproduced the issue
+            return False
         elif "'LlavaForConditionalGeneration' object has no attribute 'model'" in str(e):
             print("This is the specific error we're trying to fix - the vision model structure isn't supported yet.")
-            return True  # Successfully reproduced the specific issue
+            return False
         else:
             print("An unexpected error occurred during GGUF conversion.")
             print(f"Error type: {type(e).__name__}")
@@ -259,5 +273,5 @@ def main():
 
 if __name__ == "__main__":
     success = main()
-    print(f"Reproducer {'successfully demonstrated the issue!' if success else 'failed to demonstrate the issue.'}")
+    print(f"Reproducer {'successfully converted the model!' if success else 'failed to convert the model.'}")
     sys.exit(0 if success else 1) 
