@@ -8,16 +8,32 @@ import sys
 import torch
 import tempfile
 from pathlib import Path
+import inspect
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import the necessary functions
 from unsloth import FastVisionModel
-from unsloth.trainer import UnslothVisionDataCollator
+from unsloth.save import vision_model_save_pretrained_gguf  # Import directly for debugging
 from datasets import load_dataset
 from trl import SFTTrainer, SFTConfig
 from unsloth import is_bf16_supported
+
+
+def dump_model_structure(model, max_depth=3, current_depth=0):
+    """Helper function to print model structure for debugging"""
+    if current_depth > max_depth:
+        return "..."
+    
+    if isinstance(model, torch.nn.Module):
+        result = f"{type(model).__name__}:\n"
+        for name, child in model.named_children():
+            child_repr = dump_model_structure(child, max_depth, current_depth + 1)
+            result += "  " * (current_depth + 1) + f"{name}: {child_repr}\n"
+        return result
+    else:
+        return str(type(model).__name__)
 
 
 def main():
@@ -33,9 +49,8 @@ def main():
         # Try smaller models that will fit in T4 memory
         models_to_try = [
             # Model name, load_in_4bit, trust_remote_code
-            ("Qwen/Qwen-VL-Chat", True, True),
             ("llava-hf/llava-1.5-7b-hf", True, False),
-            ("llava-hf/bakLlava-v1-hf", True, False),
+            ("Qwen/Qwen-VL-Chat", True, True),
             ("microsoft/phi-3-vision-128k-instruct", True, True),
         ]
         
@@ -53,6 +68,19 @@ def main():
                     attn_implementation="eager"   # Use eager implementation for compatibility
                 )
                 print(f"Successfully loaded model: {model_name}")
+                
+                # Print model info
+                print("Model type:", type(model).__name__)
+                print("Model attributes:", [attr for attr in dir(model) if not attr.startswith('_')])
+                
+                # Check if it's a normal model structure
+                if hasattr(model, 'model'):
+                    print("Model has 'model' attribute")
+                elif hasattr(model, 'vision_tower'):
+                    print("Model has 'vision_tower' attribute (LlavaForConditionalGeneration structure)")
+                else:
+                    print("Model has neither 'model' nor 'vision_tower' attribute")
+                
                 break
             except Exception as e:
                 print(f"Failed to load {model_name}: {e}")
@@ -137,16 +165,40 @@ def main():
             output_dir = os.path.join(temp_dir, "model")
             os.makedirs(output_dir, exist_ok=True)
             
-            # Try to save to GGUF format
-            print(f"Attempting to save model to GGUF in {output_dir}...")
-            gguf_path = model.save_pretrained_gguf(
-                output_dir,
-                tokenizer,
-                quantization_method="q8_0"
-            )
+            # Try examining the save_pretrained_gguf function
+            print("Examining vision_model_save_pretrained_gguf function:")
+            print(inspect.getsource(vision_model_save_pretrained_gguf))
             
-            print(f"Successfully saved to GGUF: {gguf_path}")
-            return True
+            # For LlavaForConditionalGeneration models, we need to handle them differently
+            # Let's look at the model structure
+            print("\nModel structure:")
+            print(dump_model_structure(model, max_depth=1))
+            
+            # Try to save to GGUF format
+            print(f"\nAttempting to save model to GGUF in {output_dir}...")
+            
+            # First save the model and tokenizer to the output directory
+            print("Saving model and tokenizer to output directory...")
+            model.save_pretrained(output_dir)
+            tokenizer.save_pretrained(output_dir)
+            
+            try:
+                # Now try the GGUF conversion
+                gguf_path = model.save_pretrained_gguf(
+                    output_dir,
+                    tokenizer,
+                    quantization_method="q8_0"
+                )
+                print(f"Successfully saved to GGUF: {gguf_path}")
+                return True
+            except AttributeError as e:
+                if "'LlavaForConditionalGeneration' object has no attribute 'model'" in str(e):
+                    print("Caught expected error for LlavaForConditionalGeneration model")
+                    print("This is the issue we're trying to reproduce - vision models need special handling for GGUF conversion")
+                    return True  # Successfully reproduced the issue
+                else:
+                    raise  # Re-raise if it's a different AttributeError
+                
     except Exception as e:
         print(f"Error during GGUF conversion: {e}")
         if "Vision model conversion to GGUF failed" in str(e):
@@ -154,6 +206,8 @@ def main():
             return True  # We successfully reproduced the issue
         else:
             print("An unexpected error occurred during GGUF conversion.")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error message: {str(e)}")
             return False
 
 if __name__ == "__main__":
